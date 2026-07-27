@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.env
+.env.*
+!.env.example
+tests
+*.md
+*.log
+.claude
+.mcp.json
+.mcp.json.example
+docker-compose.yml
+Dockerfile

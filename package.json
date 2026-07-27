@@ -1,0 +1,50 @@
+{
+  "name": "@ai-hub-open/vk-ads-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for VK Ads API (ads.vk.com, myTarget v2) — Bun/TypeScript port",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "build": "bun build ./src/index.ts --target=bun --outdir=./dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "bin": {
+    "vk-ads-mcp": "src/index.ts"
+  },
+  "files": [
+    "src",
+    "scripts",
+    ".env.example",
+    ".mcp.json.example",
+    "CHANGELOG.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-hub-open/vk-ads-mcp.git"
+  },
+  "homepage": "https://github.com/ai-hub-open/vk-ads-mcp#readme",
+  "bugs": "https://github.com/ai-hub-open/vk-ads-mcp/issues",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "vk-ads",
+    "ppc",
+    "advertising",
+    "click-ru",
+    "bun"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

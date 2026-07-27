@@ -1,0 +1,57 @@
+{
+  "//": "Пример конфига для Claude Code. Скопируйте нужный блок в .mcp.json в корне вашего проекта.",
+  "//_1": "Выберите ОДИН блок под свой сценарий и удалите остальные.",
+
+  "mcpServers": {
+    "//_a": "— Вариант A: локальный stdio, токен VK Ads выдаёт Click.ru (свои VK-креды не нужны)",
+    "vk-ads": {
+      "command": "bun",
+      "args": [
+        "run",
+        "/абсолютный/путь/к/vk-ads-mcp/src/index.ts"
+      ],
+      "env": {
+        "CLICK_RU_TOKEN": "<API-токен из профиля click.ru>",
+        "CLICK_RU_ACCOUNT_ID": "<ID рекламного аккаунта VK Рекламы в Click.ru>",
+        "CLICK_RU_USER_ID": "<ID пользователя click.ru — только для мастер-аккаунта>"
+      }
+    },
+
+    "//_b": "— Вариант B: локальный stdio, готовый access_token VK Ads",
+    "vk-ads-token": {
+      "command": "bun",
+      "args": [
+        "run",
+        "/абсолютный/путь/к/vk-ads-mcp/src/index.ts"
+      ],
+      "env": {
+        "VK_ADS_ACCESS_TOKEN": "eyJ0..."
+      }
+    },
+
+    "//_c": "— Вариант C: локальный stdio, OAuth client credentials (сервер сам получает токен)",
+    "vk-ads-oauth": {
+      "command": "bun",
+      "args": [
+        "run",
+        "/абсолютный/путь/к/vk-ads-mcp/src/index.ts"
+      ],
+      "env": {
+        "VK_ADS_CLIENT_ID": "<client_id>",
+        "VK_ADS_CLIENT_SECRET": "<client_secret>"
+      }
+    },
+
+    "//_d": "— Вариант D: свой HTTP-сервер (bun run src/index.ts --http или Docker)",
+    "vk-ads-http": {
+      "type": "http",
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN, если задан на сервере>",
+        "X-Click-Ru-Token": "<API-токен click.ru>",
+        "X-Click-Ru-Account-Id": "<ID аккаунта VK Рекламы>",
+        "X-Click-Ru-User-Id": "<ID пользователя click.ru>"
+      }
+    }
+  }
+}

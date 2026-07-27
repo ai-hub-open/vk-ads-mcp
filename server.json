@@ -1,0 +1,53 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.json",
+  "name": "io.github.ai-hub-open/vk-ads-mcp",
+  "description": "MCP server for VK Ads API: campaigns, ad groups, ads, audiences, budgets, stats. Modes: Click.ru proxy (primary), static token, or OAuth app. Docs in Russian.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/ai-hub-open/vk-ads-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registry_type": "npm",
+      "registry_base_url": "https://registry.npmjs.org",
+      "identifier": "@ai-hub-open/vk-ads-mcp",
+      "version": "0.2.0",
+      "runtime_hint": "bunx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environment_variables": [
+        {
+          "name": "CLICK_RU_TOKEN",
+          "description": "Click.ru API token (primary mode)",
+          "is_required": false,
+          "is_secret": true
+        },
+        {
+          "name": "CLICK_RU_ACCOUNT_ID",
+          "description": "VK Ads account id in Click.ru",
+          "is_required": false
+        },
+        {
+          "name": "VK_ADS_ACCESS_TOKEN",
+          "description": "Static VK Ads token (alternative mode)",
+          "is_required": false,
+          "is_secret": true
+        },
+        {
+          "name": "VK_ADS_CLIENT_ID",
+          "description": "OAuth app client id (target.vk.ru)",
+          "is_required": false
+        },
+        {
+          "name": "VK_ADS_CLIENT_SECRET",
+          "description": "OAuth app client secret",
+          "is_required": false,
+          "is_secret": true
+        }
+      ]
+    }
+  ]
+}
