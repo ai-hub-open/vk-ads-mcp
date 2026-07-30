@@ -11,6 +11,8 @@
 //
 // CORS: разрешён для всех источников (*). При необходимости ограничьте в MCP_ALLOWED_ORIGIN.
 
+import { timingSafeEqual } from "node:crypto";
+
 import type { McpServer, JsonRpcRequest } from "../server.ts";
 import { errorResponse } from "../server.ts";
 import { VKAdsClient } from "../client.ts";
@@ -22,7 +24,7 @@ export interface HttpOptions {
   allowedOrigin?: string;
 }
 
-export function runHttp(server: McpServer, opts: HttpOptions): void {
+export function runHttp(server: McpServer, opts: HttpOptions) {
   const { port, host = "0.0.0.0", authToken, allowedOrigin = "*" } = opts;
 
   const baseHeaders: Record<string, string> = {
@@ -125,6 +127,7 @@ export function runHttp(server: McpServer, opts: HttpOptions): void {
   process.stderr.write(
     `VK Ads MCP Server запущен на http://${host}:${httpServer.port}/mcp${authInfo}\n`
   );
+  return httpServer;
 }
 
 function jsonResponse(body: unknown, headers: Record<string, string>): Response {
@@ -134,11 +137,29 @@ function jsonResponse(body: unknown, headers: Record<string, string>): Response 
   });
 }
 
-function checkAuth(req: Request, expectedToken?: string): boolean {
+/**
+ * Проверяет Bearer-токен шлюза. Сравнение постоянное по времени: обычный `===`
+ * выходит на первом несовпавшем байте, и по задержке ответа токен можно
+ * восстановить посимвольно.
+ */
+export function checkAuth(req: Request, expectedToken?: string): boolean {
   if (!expectedToken) return true;
   const header = req.headers.get("Authorization") ?? "";
   const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1] === expectedToken;
+  if (!match?.[1]) return false;
+  return constantTimeEquals(match[1], expectedToken);
+}
+
+function constantTimeEquals(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  // timingSafeEqual требует равной длины, а сама длина секретом не является:
+  // сравниваем её отдельно, после проверки содержимого равных по длине буферов.
+  if (bufA.length !== bufB.length) {
+    timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
 }
 
 function unauthorized(headers: Record<string, string>): Response {
@@ -168,7 +189,7 @@ function unauthorized(headers: Record<string, string>): Response {
  *   Общее (опционально):
  *     X-VK-Ads-Base-Url: https://ads.vk.com
  */
-function buildClientFromHeaders(req: Request): VKAdsClient | undefined {
+export function buildClientFromHeaders(req: Request): VKAdsClient | undefined {
   const h = req.headers;
   const token = h.get("X-VK-Ads-Token");
   const clientId = h.get("X-VK-Ads-Client-Id");
@@ -181,6 +202,10 @@ function buildClientFromHeaders(req: Request): VKAdsClient | undefined {
 
   // Валидация парных кред — внутри конструктора VKAdsClient.
   return new VKAdsClient({
+    // Запрос пришёл по сети: чтение файлов сервера и обращения во внутреннюю
+    // сеть запрещены независимо от настроек окружения.
+    allowLocalFiles: false,
+    allowPrivateNetwork: false,
     baseUrl: h.get("X-VK-Ads-Base-Url") || undefined,
     accessToken: token || undefined,
     clientId: clientId || undefined,

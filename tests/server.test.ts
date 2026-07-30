@@ -4,13 +4,14 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { VKAdsClient } from "../src/client.ts";
 import { McpServer, PROTOCOL_VERSION, deepNormalize } from "../src/server.ts";
-import { json, mockFetch, setupTestEnv, teardownTestEnv } from "./helpers.ts";
+import { SERVER_NAME, VERSION } from "../src/version.ts";
+import { json, mockFetch, setupTestEnv, teardownTestEnv, testStore } from "./helpers.ts";
 
 beforeEach(setupTestEnv);
 afterEach(teardownTestEnv);
 
 function makeServer(): McpServer {
-  return new McpServer(new VKAdsClient({ accessToken: "test-token" }));
+  return new McpServer(new VKAdsClient({ accessToken: "test-token", tokenStore: testStore }));
 }
 
 test("initialize возвращает версию протокола и имя сервера", async () => {
@@ -20,8 +21,14 @@ test("initialize возвращает версию протокола и имя 
     method: "initialize",
   });
   expect(resp.result.protocolVersion).toBe(PROTOCOL_VERSION);
-  expect(resp.result.serverInfo.name).toBe("vk-ads-mcp");
+  expect(resp.result.serverInfo.name).toBe(SERVER_NAME);
   expect(resp.result.capabilities.tools).toEqual({ listChanged: false });
+});
+
+test("serverInfo сообщает версию из package.json, а не захардкоженную", async () => {
+  const resp: any = await makeServer().handle({ id: 1, method: "initialize" });
+  expect(resp.result.serverInfo.version).toBe(VERSION);
+  expect(VERSION).toMatch(/^\d+\.\d+\.\d+/);
 });
 
 test("tools/list: 48 инструментов, все с префиксом vk_ads_ и валидными схемами", async () => {

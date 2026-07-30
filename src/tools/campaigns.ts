@@ -2,7 +2,16 @@
 // UI «Кампания» — это ad_plan (tools/adPlans.ts).
 
 import type { ToolRegistry } from "../toolRegistry.ts";
-import { fieldsProp, paginationProps, requireId } from "./util.ts";
+import {
+  SOFT_DELETE_BODY,
+  fieldsProp,
+  idPayloadSchema,
+  idSchema,
+  paginationParams,
+  paginationProps,
+  payloadSchema,
+  requireId,
+} from "./util.ts";
 
 const CAMPAIGN_STATUSES = ["active", "blocked", "deleted"] as const;
 
@@ -25,8 +34,7 @@ export function registerCampaigns(registry: ToolRegistry): void {
     },
     handler: (client, args) =>
       client.get("/api/v2/campaigns.json", {
-        limit: args.limit ?? 50,
-        offset: args.offset ?? 0,
+        ...paginationParams(args),
         _status__in: args.status,
         fields: args.fields,
       }),
@@ -57,17 +65,9 @@ export function registerCampaigns(registry: ToolRegistry): void {
       "name, objective, budget_limit, budget_limit_day, package_id, targetings и т.д. " +
       "⚠ Обязательно указывайте ad_plan_id — campaign без него не будет видна " +
       "в новом интерфейсе ads.vk.com (сущность-«сирота»).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        payload: {
-          type: "object",
-          description:
-            "Объект Campaign по схеме VK Ads (name, ad_plan_id, package_id, targetings…)",
-        },
-      },
-      required: ["payload"],
-    },
+    inputSchema: payloadSchema(
+      "Объект Campaign по схеме VK Ads (name, ad_plan_id, package_id, targetings…)"
+    ),
     handler: (client, args) => client.post("/api/v2/campaigns.json", args.payload),
   });
 
@@ -75,14 +75,7 @@ export function registerCampaigns(registry: ToolRegistry): void {
     name: "vk_ads_campaigns_update",
     description:
       "Обновить campaign (UI «Группа объявлений»). PATCH-семантика: только изменяемые поля.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        campaign_id: { type: "integer", description: "ID campaign" },
-        payload: { type: "object", description: "Изменяемые поля Campaign" },
-      },
-      required: ["campaign_id", "payload"],
-    },
+    inputSchema: idPayloadSchema("campaign_id", "ID campaign", "Изменяемые поля Campaign"),
     handler: (client, args) =>
       client.post(
         `/api/v2/campaigns/${requireId(args.campaign_id, "campaign_id")}.json`,
@@ -126,17 +119,11 @@ export function registerCampaigns(registry: ToolRegistry): void {
     name: "vk_ads_campaigns_delete",
     description:
       "Мягко удалить campaign (UI «Группа объявлений») — выставляет status=deleted.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        campaign_id: { type: "integer", description: "ID campaign" },
-      },
-      required: ["campaign_id"],
-    },
+    inputSchema: idSchema("campaign_id", "ID campaign"),
     handler: (client, args) =>
       client.post(
         `/api/v2/campaigns/${requireId(args.campaign_id, "campaign_id")}.json`,
-        { status: "deleted" }
+        SOFT_DELETE_BODY
       ),
   });
 }
