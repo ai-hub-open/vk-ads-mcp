@@ -8,21 +8,13 @@
 //   C. Click.ru — токен VK Ads выдаёт Click.ru по своему API-токену:
 //      GET {CLICK_RU_BASE_URL}/accounts/{accountId}/access_token/vk_ads/
 //
-// Полученные (не статические) токены кэшируются в памяти процесса и на диске
-// (~/.cache/vk-ads-mcp, формат совместим с python-версией vk-ads-mcp).
+// Полученные (не статические) токены кэшируются через TokenStore.
 // При 401 токен сбрасывается и запрашивается заново, запрос повторяется один раз.
 
 import { createHash } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+
+import { defaultTokenStore, type TokenStore } from "./tokenStore.ts";
+import { USER_AGENT } from "./version.ts";
 
 export const DEFAULT_BASE_URL = "https://ads.vk.com";
 export const CLICK_RU_DEFAULT_BASE = "https://api.click.ru/V0";
@@ -41,87 +33,6 @@ export class VKAdsError extends Error {
     this.status = status;
     this.payload = payload;
     this.url = url;
-  }
-}
-
-// --- Кэш токенов ----------------------------------------------------------------
-// Память процесса + диск. Дисковый формат и путь совместимы с python-версией:
-// $XDG_CACHE_HOME/vk-ads-mcp/token-<sha256(key)[:16]>.json → {access_token, expires_at}.
-
-interface CachedToken {
-  access_token: string;
-  expires_at: number; // unix-секунды
-}
-
-const memoryTokenCache = new Map<string, CachedToken>();
-
-/** Сбрасывает in-memory кэш токенов (для тестов). */
-export function clearTokenMemoryCache(): void {
-  memoryTokenCache.clear();
-}
-
-function cacheDir(): string {
-  const root = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
-  return join(root, "vk-ads-mcp");
-}
-
-function tokenCachePath(cacheKey: string): string {
-  const hash = createHash("sha256").update(cacheKey).digest("hex").slice(0, 16);
-  return join(cacheDir(), `token-${hash}.json`);
-}
-
-/** Токен ещё живой (с запасом 60 секунд до истечения). */
-function isFresh(t: CachedToken): boolean {
-  return t.expires_at - 60 > Date.now() / 1000;
-}
-
-function loadCachedToken(cacheKey: string): CachedToken | null {
-  const mem = memoryTokenCache.get(cacheKey);
-  if (mem && isFresh(mem)) return mem;
-
-  const path = tokenCachePath(cacheKey);
-  if (!existsSync(path)) return null;
-  try {
-    const data = JSON.parse(readFileSync(path, "utf8")) as CachedToken;
-    if (data.access_token && isFresh(data)) {
-      memoryTokenCache.set(cacheKey, data);
-      return data;
-    }
-  } catch {
-    // повреждённый кэш — игнорируем
-  }
-  return null;
-}
-
-function saveCachedToken(cacheKey: string, token: string, expiresIn: number): void {
-  const entry: CachedToken = {
-    access_token: token,
-    expires_at: Date.now() / 1000 + expiresIn,
-  };
-  memoryTokenCache.set(cacheKey, entry);
-  try {
-    mkdirSync(cacheDir(), { recursive: true });
-    const path = tokenCachePath(cacheKey);
-    writeFileSync(path, JSON.stringify(entry));
-    try {
-      chmodSync(path, 0o600);
-    } catch {
-      // Windows — chmod не поддерживается, не критично
-    }
-  } catch (e) {
-    process.stderr.write(
-      `Warning: не удалось сохранить кэш токена: ${(e as Error).message}\n`
-    );
-  }
-}
-
-function clearCachedToken(cacheKey: string): void {
-  memoryTokenCache.delete(cacheKey);
-  try {
-    const path = tokenCachePath(cacheKey);
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // не критично
   }
 }
 
@@ -144,6 +55,22 @@ export interface ClientOptions {
   clickRuBaseUrl?: string;
   /** Таймаут HTTP-запросов в секундах (по умолчанию 30) */
   timeout?: number;
+
+  /**
+   * Разрешить инструментам читать локальные файлы (загрузка креативов с диска).
+   * Для stdio-запуска это файлы самого пользователя — по умолчанию `true`.
+   * Размещённый HTTP-сервер обязан ставить `false`: иначе вызывающий прочитает
+   * файлы сервера (`/app/.env`) чужими руками.
+   */
+  allowLocalFiles?: boolean;
+  /**
+   * Разрешить загрузку по URL, ведущим во внутреннюю сеть. По умолчанию `true`
+   * для локального запуска; размещённый сервер ставит `false` (защита от SSRF).
+   */
+  allowPrivateNetwork?: boolean;
+
+  /** Хранилище токенов (по умолчанию общее на процесс). */
+  tokenStore?: TokenStore;
 }
 
 interface RequestOptions {
@@ -152,9 +79,16 @@ interface RequestOptions {
   formData?: FormData;
 }
 
+/** Отпечаток секрета для ключа кэша — сам секрет в ключ не попадает. */
+function fingerprint(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
 export class VKAdsClient {
   readonly baseUrl: string;
   readonly timeoutMs: number;
+  readonly allowLocalFiles: boolean;
+  readonly allowPrivateNetwork: boolean;
 
   private readonly staticToken?: string;
   private readonly clientId?: string;
@@ -164,6 +98,7 @@ export class VKAdsClient {
   private readonly clickRuAccountId?: string;
   private readonly clickRuUserId?: string;
   private readonly clickRuBaseUrl: string;
+  private readonly store: TokenStore;
 
   private token?: string;
 
@@ -178,6 +113,9 @@ export class VKAdsClient {
     this.clickRuAccountId = opts.clickRuAccountId || undefined;
     this.clickRuUserId = opts.clickRuUserId || undefined;
     this.clickRuBaseUrl = (opts.clickRuBaseUrl || CLICK_RU_DEFAULT_BASE).replace(/\/+$/, "");
+    this.allowLocalFiles = opts.allowLocalFiles ?? true;
+    this.allowPrivateNetwork = opts.allowPrivateNetwork ?? true;
+    this.store = opts.tokenStore ?? defaultTokenStore;
 
     if ((this.clientId && !this.clientSecret) || (!this.clientId && this.clientSecret)) {
       throw new Error("VK_ADS_CLIENT_ID и VK_ADS_CLIENT_SECRET задаются только вместе");
@@ -193,15 +131,6 @@ export class VKAdsClient {
     }
 
     this.token = this.staticToken;
-
-    // Дисковый кэш — только для получаемых токенов; статический используем как есть.
-    if (!this.token) {
-      const key = this.cacheKey();
-      if (key) {
-        const cached = loadCachedToken(key);
-        if (cached) this.token = cached.access_token;
-      }
-    }
   }
 
   get hasClientCredentials(): boolean {
@@ -217,15 +146,30 @@ export class VKAdsClient {
     return this.hasClientCredentials || this.hasClickRu;
   }
 
-  /** Ключ дискового/in-memory кэша токенов для текущего источника. */
+  /**
+   * Ключ кэша токенов. Включает отпечаток секрета: без него клиент, знающий
+   * только публичный идентификатор (client_id или Click.ru accountId), получил
+   * бы из общего кэша токен, выписанный на чужие креды. Отпечаток также
+   * разводит кэш при ротации секрета.
+   */
   private cacheKey(): string | undefined {
     if (this.hasClientCredentials) {
-      // Базовая часть побайтово совместима с python-версией.
-      const base = `${this.clientId}|${this.baseUrl}`;
-      return this.agencyClientName ? `${base}|${this.agencyClientName}` : base;
+      return [
+        "oauth",
+        this.clientId,
+        this.baseUrl,
+        this.agencyClientName ?? "",
+        fingerprint(this.clientSecret!),
+      ].join("|");
     }
     if (this.hasClickRu) {
-      return `clickru|${this.clickRuAccountId}|${this.clickRuBaseUrl}`;
+      return [
+        "clickru",
+        this.clickRuAccountId,
+        this.clickRuBaseUrl,
+        this.clickRuUserId ?? "",
+        fingerprint(this.clickRuToken!),
+      ].join("|");
     }
     return undefined;
   }
@@ -236,10 +180,10 @@ export class VKAdsClient {
 
     const key = this.cacheKey();
     if (key) {
-      const cached = loadCachedToken(key);
+      const cached = this.store.get(key);
       if (cached) {
-        this.token = cached.access_token;
-        return this.token;
+        this.token = cached;
+        return cached;
       }
     }
 
@@ -254,11 +198,11 @@ export class VKAdsClient {
     );
   }
 
-  /** Сбрасывает текущий токен и его кэш (память + диск). */
+  /** Сбрасывает текущий токен и его кэш. */
   invalidateToken(): void {
     this.token = undefined;
     const key = this.cacheKey();
-    if (key) clearCachedToken(key);
+    if (key) this.store.delete(key);
   }
 
   private async fetchOAuthToken(): Promise<string> {
@@ -282,7 +226,7 @@ export class VKAdsClient {
 
     const expiresIn = Number((payload as any)?.expires_in ?? 86400);
     this.token = token;
-    saveCachedToken(this.cacheKey()!, token, expiresIn);
+    this.store.set(this.cacheKey()!, token, expiresIn);
     return token;
   }
 
@@ -305,7 +249,7 @@ export class VKAdsClient {
 
     const expiresIn = Number(data?.expires_in ?? 86400);
     this.token = token;
-    saveCachedToken(this.cacheKey()!, token, expiresIn);
+    this.store.set(this.cacheKey()!, token, expiresIn);
     return token;
   }
 
@@ -386,7 +330,7 @@ export class VKAdsClient {
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
-      "User-Agent": "vk-ads-mcp/1.0",
+      "User-Agent": USER_AGENT,
     };
 
     let body: FormData | string | undefined;

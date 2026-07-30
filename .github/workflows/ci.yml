@@ -1,0 +1,28 @@
+name: Проверки
+
+# Публикация запускается только на релиз, поэтому без этого workflow
+# сломанный код попадал бы в dev и main незамеченным.
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+jobs:
+  check:
+    name: Типы и тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Установить зависимости
+        run: bun install --frozen-lockfile
+
+      - name: Проверка типов
+        run: bun run typecheck
+
+      - name: Тесты
+        run: bun run test

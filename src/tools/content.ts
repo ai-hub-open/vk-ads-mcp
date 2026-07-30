@@ -1,5 +1,12 @@
 // Контент-хранилище VK Ads: загрузка изображений и видео для баннеров.
 //
+// Источник задаёт модель, поэтому доступ ограничен политикой клиента:
+//   — allowLocalFiles: чтение с диска (для stdio это файлы самого пользователя;
+//     размещённый HTTP-сервер обязан запрещать — иначе вызывающий прочитает
+//     файлы сервера);
+//   — allowPrivateNetwork: обращения во внутреннюю сеть при загрузке по URL
+//     (защита от SSRF, см. src/urlGuard.ts).
+//
 // Примечание: эндпоинты /api/v2/content/{static,video,html5}.json принимают
 // только POST (загрузка) — листинга загруженного контента в живом API нет
 // (GET отвечает 405, проверено против ads.vk.com).
@@ -10,22 +17,30 @@ import { basename, join } from "node:path";
 
 import type { VKAdsClient } from "../client.ts";
 import type { ToolRegistry } from "../toolRegistry.ts";
+import { fetchGuarded } from "../urlGuard.ts";
 
 /** Читает источник: локальный путь (с поддержкой ~) или публичный http(s)-URL. */
 async function readSource(
+  client: VKAdsClient,
   source: string,
-  timeoutMs: number,
   fallbackName: string
 ): Promise<{ bytes: Uint8Array; filename: string }> {
-  if (/^https?:\/\//i.test(source)) {
-    const r = await fetch(source, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!r.ok) {
-      throw new Error(`Не удалось скачать ${source}: HTTP ${r.status}`);
-    }
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    const clean = source.split(/[?#]/)[0] ?? source;
-    const filename = clean.split("/").pop() || fallbackName;
-    return { bytes, filename };
+  // Схема из двух и более букв: односимвольная — это диск Windows (C:\...),
+  // а не URL. Всё, что похоже на схему, уходит в fetchGuarded — он отсеет
+  // file:, gopher: и прочее, что до сети доходить не должно.
+  if (/^[a-z][a-z0-9+.-]+:/i.test(source)) {
+    const { bytes, filename } = await fetchGuarded(source, {
+      timeoutMs: client.timeoutMs,
+      allowPrivateNetwork: client.allowPrivateNetwork,
+    });
+    return { bytes, filename: filename || fallbackName };
+  }
+
+  if (!client.allowLocalFiles) {
+    throw new Error(
+      "Чтение локальных файлов отключено на этом сервере. Передайте публичный " +
+        "http(s)-URL креатива."
+    );
   }
 
   let path = source;
@@ -34,7 +49,7 @@ async function readSource(
     path = join(homedir(), path.slice(2));
   }
   const bytes = await readFile(path);
-  return { bytes, filename: basename(path) };
+  return { bytes, filename: basename(path) || fallbackName };
 }
 
 async function upload(
@@ -43,11 +58,7 @@ async function upload(
   source: unknown,
   fallbackName: string
 ): Promise<unknown> {
-  const { bytes, filename } = await readSource(
-    String(source),
-    client.timeoutMs,
-    fallbackName
-  );
+  const { bytes, filename } = await readSource(client, String(source), fallbackName);
   return client.uploadFile(endpoint, filename, bytes);
 }
 
@@ -56,14 +67,15 @@ export function registerContent(registry: ToolRegistry): void {
     name: "vk_ads_content_upload_image",
     description:
       "Загрузить статичное изображение в хранилище контента VK Ads. Источник — " +
-      "локальный путь к файлу или публичный URL. Возвращает объект контента " +
-      "(id, url, размеры) для использования в banner (content.image_id).",
+      "публичный http(s)-URL или локальный путь (если сервер разрешает чтение " +
+      "файлов). Возвращает объект контента (id, url, размеры) для использования " +
+      "в banner (content.image_id).",
     inputSchema: {
       type: "object",
       properties: {
         source_path_or_url: {
           type: "string",
-          description: "Локальный путь или http(s)-URL изображения",
+          description: "http(s)-URL изображения или локальный путь к файлу",
         },
       },
       required: ["source_path_or_url"],
@@ -75,14 +87,15 @@ export function registerContent(registry: ToolRegistry): void {
   registry.register({
     name: "vk_ads_content_upload_video",
     description:
-      "Загрузить видео в хранилище контента VK Ads. Источник — локальный путь " +
-      "к файлу или публичный URL. Возвращает объект контента для использования в banner.",
+      "Загрузить видео в хранилище контента VK Ads. Источник — публичный " +
+      "http(s)-URL или локальный путь (если сервер разрешает чтение файлов). " +
+      "Возвращает объект контента для использования в banner.",
     inputSchema: {
       type: "object",
       properties: {
         source_path_or_url: {
           type: "string",
-          description: "Локальный путь или http(s)-URL видеофайла",
+          description: "http(s)-URL видеофайла или локальный путь к файлу",
         },
       },
       required: ["source_path_or_url"],

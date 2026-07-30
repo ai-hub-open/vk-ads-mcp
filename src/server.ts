@@ -12,6 +12,7 @@ import { registerStatistics } from "./tools/statistics.ts";
 import { registerRemarketing } from "./tools/remarketing.ts";
 import { registerAgency } from "./tools/agency.ts";
 import { registerDictionaries } from "./tools/dictionaries.ts";
+import { SERVER_NAME, VERSION } from "./version.ts";
 
 export const PROTOCOL_VERSION = "2024-11-05";
 
@@ -68,7 +69,7 @@ export class McpServer {
           return jsonrpcResponse(id, {
             protocolVersion: PROTOCOL_VERSION,
             capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: "vk-ads-mcp", version: "1.0.0" },
+            serverInfo: { name: SERVER_NAME, version: VERSION },
           });
         case "notifications/initialized":
           return null;

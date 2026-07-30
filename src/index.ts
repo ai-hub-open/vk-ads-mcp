@@ -11,9 +11,27 @@ if (envPath) {
   process.stderr.write(`Загружен .env: ${envPath}\n`);
 }
 
+const transport =
+  process.argv.includes("--http")
+    ? "http"
+    : (process.env.MCP_TRANSPORT ?? "stdio").toLowerCase();
+const hosted = transport === "http";
+
 const creds = readEnvCreds();
 for (const w of creds.warnings) {
   process.stderr.write(`Warning: ${w}\n`);
+}
+
+// В HTTP-режиме сервер принимает запросы по сети, поэтому чтение локальных
+// файлов и обращения во внутреннюю сеть выключены по умолчанию: иначе
+// вызывающий смог бы прочитать файлы сервера или сходить на его метаданные.
+// Включить обратно осознанно: VK_ADS_ALLOW_LOCAL_FILES / VK_ADS_ALLOW_PRIVATE_NETWORK.
+const options = { ...creds.options };
+if (hosted) {
+  if (process.env.VK_ADS_ALLOW_LOCAL_FILES === undefined) options.allowLocalFiles = false;
+  if (process.env.VK_ADS_ALLOW_PRIVATE_NETWORK === undefined) {
+    options.allowPrivateNetwork = false;
+  }
 }
 
 // Креды из .env — используются как default для запросов без per-request заголовков.
@@ -23,7 +41,7 @@ let defaultClient: VKAdsClient | undefined;
 
 if (creds.hasAny) {
   try {
-    defaultClient = new VKAdsClient(creds.options);
+    defaultClient = new VKAdsClient(options);
     process.stderr.write(`Режим по умолчанию: ${creds.mode}\n`);
   } catch (e) {
     process.stderr.write(`Ошибка инициализации клиента: ${(e as Error).message}\n`);
@@ -39,12 +57,7 @@ if (creds.hasAny) {
 
 const server = new McpServer(defaultClient);
 
-const transport =
-  process.argv.includes("--http")
-    ? "http"
-    : (process.env.MCP_TRANSPORT ?? "stdio").toLowerCase();
-
-if (transport === "http") {
+if (hosted) {
   const port = parseInt(process.env.MCP_PORT ?? "3000", 10);
   const host = process.env.MCP_HOST ?? "0.0.0.0";
   const authToken = process.env.MCP_AUTH_TOKEN || undefined;

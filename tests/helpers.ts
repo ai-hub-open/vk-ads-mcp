@@ -1,10 +1,6 @@
-// Общие помощники тестов: мок fetch и изоляция кэша токенов.
+// Общие помощники тестов: мок fetch и изоляция кэшей.
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-import { clearTokenMemoryCache } from "../src/client.ts";
+import { TokenStore } from "../src/tokenStore.ts";
 import { clearRegionsCache } from "../src/tools/dictionaries.ts";
 
 export interface FetchCall {
@@ -15,8 +11,12 @@ export interface FetchCall {
 export const calls: FetchCall[] = [];
 
 const originalFetch = globalThis.fetch;
-let cacheDir: string | null = null;
-let savedXdg: string | undefined;
+
+/**
+ * Хранилище токенов для тестов: только память, без диска. Пересоздаётся в
+ * setupTestEnv, поэтому тесты не делят состояние друг с другом.
+ */
+export let testStore = new TokenStore({ dir: null });
 
 /** Подменяет globalThis.fetch; все вызовы записываются в `calls`. */
 export function mockFetch(
@@ -37,27 +37,14 @@ export function json(obj: unknown, status = 200): Response {
   });
 }
 
-/** Вызывать в beforeEach: чистые счётчики, чистые кэши, изолированный XDG_CACHE_HOME. */
+/** Вызывать в beforeEach: чистые счётчики и кэши. */
 export function setupTestEnv(): void {
   calls.length = 0;
-  clearTokenMemoryCache();
+  testStore = new TokenStore({ dir: null });
   clearRegionsCache();
-  savedXdg = process.env.XDG_CACHE_HOME;
-  cacheDir = mkdtempSync(join(tmpdir(), "vk-ads-mcp-test-"));
-  process.env.XDG_CACHE_HOME = cacheDir;
 }
 
 /** Вызывать в afterEach. */
 export function teardownTestEnv(): void {
   globalThis.fetch = originalFetch;
-  if (savedXdg === undefined) delete process.env.XDG_CACHE_HOME;
-  else process.env.XDG_CACHE_HOME = savedXdg;
-  if (cacheDir) {
-    try {
-      rmSync(cacheDir, { recursive: true, force: true });
-    } catch {
-      // Windows иногда держит файлы — не критично для тестов
-    }
-    cacheDir = null;
-  }
 }
