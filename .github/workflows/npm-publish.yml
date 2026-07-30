@@ -1,0 +1,114 @@
+name: Публикация в npm
+
+# Запускается, когда релиз на GitHub опубликован (черновики игнорируются).
+# Ручной запуск (workflow_dispatch) по умолчанию делает прогон без публикации —
+# удобно проверить сборку и состав пакета, ничего не выпуская.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Прогон без публикации (проверить состав пакета)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Нужно и для provenance (подтверждение происхождения пакета),
+  # и для доверенной публикации через OIDC без долгоживущего токена.
+  id-token: write
+
+jobs:
+  publish:
+    name: Проверки и публикация
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Node нужен ради npm: публикуем и подписываем provenance именно им.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Доверенная публикация по OIDC требует свежего npm (11.5.1+).
+      - name: Обновить npm
+        run: npm install -g npm@latest
+
+      - name: Установить зависимости
+        run: bun install --frozen-lockfile
+
+      - name: Проверка типов
+        run: bun run typecheck
+
+      - name: Тесты
+        run: bun run test
+
+      # Тег релиза и версия пакета обязаны совпадать: иначе в npm уедет
+      # не та версия, которую объявили в релизе.
+      - name: Сверка версии с тегом релиза
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "Версия в package.json: $PKG_VERSION"
+
+          if [ -z "${TAG:-}" ]; then
+            echo "Ручной запуск без релиза — сверка тега пропущена."
+          else
+            TAG_VERSION="${TAG#v}"
+            echo "Тег релиза: $TAG (версия $TAG_VERSION)"
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::Версия в package.json ($PKG_VERSION) не совпадает с тегом релиза ($TAG). Поднимите версию в package.json или исправьте тег."
+              exit 1
+            fi
+          fi
+
+          # server.json — запись в реестре MCP. Расхождение версии не мешает
+          # публикации в npm, поэтому только предупреждаем.
+          if [ -f server.json ]; then
+            SERVER_VERSION=$(node -p "require('./server.json').version")
+            if [ "$SERVER_VERSION" != "$PKG_VERSION" ]; then
+              echo "::warning::Версия в server.json ($SERVER_VERSION) отличается от package.json ($PKG_VERSION) — запись в реестре MCP устареет."
+            fi
+          fi
+
+      - name: Публикация в npm
+        env:
+          # Если секрет не задан, публикация пойдёт по доверенному издателю (OIDC).
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "Авторизация по токену NPM_TOKEN."
+            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          else
+            echo "NPM_TOKEN не задан — публикация через доверенного издателя (OIDC)."
+          fi
+
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            echo "Прогон без публикации."
+            npm publish --dry-run --access public
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Итог
+        if: success()
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            echo "### Прогон завершён: $PKG_NAME@$PKG_VERSION не публиковался" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Опубликовано: $PKG_NAME@$PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo "https://www.npmjs.com/package/$PKG_NAME/v/$PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          fi
