@@ -6,15 +6,21 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { VKAdsClient } from "../src/client.ts";
+import { VKAdsClient, type ClientOptions } from "../src/client.ts";
 import { McpServer } from "../src/server.ts";
-import { calls, json, mockFetch, setupTestEnv, teardownTestEnv } from "./helpers.ts";
+import { calls, json, mockFetch, setupTestEnv, teardownTestEnv, testStore } from "./helpers.ts";
 
 beforeEach(setupTestEnv);
 afterEach(teardownTestEnv);
 
-async function callTool(name: string, args: Record<string, unknown> = {}): Promise<any> {
-  const server = new McpServer(new VKAdsClient({ accessToken: "t" }));
+async function callTool(
+  name: string,
+  args: Record<string, unknown> = {},
+  clientOpts: Partial<ClientOptions> = {}
+): Promise<any> {
+  const server = new McpServer(
+    new VKAdsClient({ accessToken: "t", tokenStore: testStore, ...clientOpts })
+  );
   return server.handle({
     jsonrpc: "2.0",
     id: 1,
@@ -288,19 +294,60 @@ test("content_upload_image загружает локальный файл как
 
 test("content_upload_image скачивает по URL и переотправляет", async () => {
   mockFetch((url) => {
-    if (url === "https://example.com/pic/banner.jpg?v=2") {
+    if (url.startsWith("https://8.8.8.8/")) {
       return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
     }
     return json({ id: 5 });
   });
 
   await callTool("vk_ads_content_upload_image", {
-    source_path_or_url: "https://example.com/pic/banner.jpg?v=2",
+    source_path_or_url: "https://8.8.8.8/pic/banner.jpg?v=2",
   });
 
-  expect(calls[0]!.url).toBe("https://example.com/pic/banner.jpg?v=2");
+  expect(calls[0]!.url).toBe("https://8.8.8.8/pic/banner.jpg?v=2");
   const uploadCall = calls[1]!;
   expect(uploadCall.url).toContain("/api/v2/content/static.json");
   const file = (uploadCall.init.body as FormData).get("file") as File;
   expect(file.name).toBe("banner.jpg");
+});
+
+test("при allowLocalFiles=false чтение с диска запрещено", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vk-ads-upload-"));
+  const filePath = join(dir, "secret.env");
+  writeFileSync(filePath, "VK_ADS_ACCESS_TOKEN=утекший");
+
+  mockFetch(() => json({ id: 1 }));
+  const resp = await callTool(
+    "vk_ads_content_upload_image",
+    { source_path_or_url: filePath },
+    { allowLocalFiles: false }
+  );
+
+  expect(calls.length).toBe(0);
+  expect(resp.result.isError).toBe(true);
+  expect(resultText(resp)).toContain("Чтение локальных файлов отключено");
+});
+
+test("при allowPrivateNetwork=false загрузка с внутреннего адреса блокируется", async () => {
+  mockFetch(() => new Response("СЕКРЕТ", { status: 200 }));
+  const resp = await callTool(
+    "vk_ads_content_upload_image",
+    { source_path_or_url: "http://169.254.169.254/latest/meta-data/" },
+    { allowPrivateNetwork: false }
+  );
+
+  expect(calls.length).toBe(0);
+  expect(resp.result.isError).toBe(true);
+  expect(resultText(resp)).toContain("внутренний адрес");
+});
+
+test("file:// отвергается даже при разрешённой внутренней сети", async () => {
+  mockFetch(() => json({}));
+  const resp = await callTool("vk_ads_content_upload_video", {
+    source_path_or_url: "file:///etc/passwd",
+  });
+
+  expect(calls.length).toBe(0);
+  expect(resp.result.isError).toBe(true);
+  expect(resultText(resp)).toContain("Схема file: запрещена");
 });

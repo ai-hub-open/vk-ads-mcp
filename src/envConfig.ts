@@ -15,6 +15,12 @@ export interface EnvCreds {
   mode: string | null;
 }
 
+/** Разбор булевой переменной окружения; undefined, если не задана. */
+function envFlag(raw: string | undefined): boolean | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  return raw.toLowerCase() === "true" || raw === "1";
+}
+
 export function readEnvCreds(
   env: Record<string, string | undefined> = process.env
 ): EnvCreds {
@@ -52,6 +58,11 @@ export function readEnvCreds(
     clickRuUserId: env.CLICK_RU_USER_ID,
     clickRuBaseUrl: env.CLICK_RU_BASE_URL,
     timeout: parseFloat(env.VK_ADS_TIMEOUT ?? "30"),
+    // Значения по умолчанию — для локального (stdio) запуска, где файлы и
+    // внутренняя сеть принадлежат самому пользователю. Точка входа ужесточает
+    // их для HTTP-режима, см. src/index.ts.
+    allowLocalFiles: envFlag(env.VK_ADS_ALLOW_LOCAL_FILES) ?? true,
+    allowPrivateNetwork: envFlag(env.VK_ADS_ALLOW_PRIVATE_NETWORK) ?? true,
   };
 
   const mode = hasStatic

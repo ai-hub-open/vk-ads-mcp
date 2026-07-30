@@ -1,7 +1,7 @@
 // Статистика VK Ads: дневная, суммарная, срезы по измерениям и асинхронные отчёты.
 
 import type { ToolRegistry } from "../toolRegistry.ts";
-import { pathSegment, requireId } from "./util.ts";
+import { idSchema, pathSegment, payloadSchema, requireId } from "./util.ts";
 
 const STAT_ENTITIES = ["campaigns", "ad_groups", "banners", "users"] as const;
 const BREAKDOWN_ENTITIES = ["campaigns", "ad_groups", "banners"] as const;
@@ -122,16 +122,7 @@ export function registerStatistics(registry: ToolRegistry): void {
       "выгрузок). payload: entity, id, date_from, date_to, metrics, group_by и др. " +
       "Возвращает {id, status}; статус и ссылку на скачивание опрашивайте через " +
       "vk_ads_async_report_get.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        payload: {
-          type: "object",
-          description: "Параметры отчёта по схеме VK Ads Reports",
-        },
-      },
-      required: ["payload"],
-    },
+    inputSchema: payloadSchema("Параметры отчёта по схеме VK Ads Reports"),
     handler: (client, args) =>
       client.post("/api/v2/statistics/reports.json", args.payload),
   });
@@ -140,13 +131,7 @@ export function registerStatistics(registry: ToolRegistry): void {
     name: "vk_ads_async_report_get",
     description:
       "Статус асинхронного отчёта и ссылка на скачивание, когда отчёт готов.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        report_id: { type: "integer", description: "ID отчёта из vk_ads_async_report_create" },
-      },
-      required: ["report_id"],
-    },
+    inputSchema: idSchema("report_id", "ID отчёта из vk_ads_async_report_create"),
     handler: (client, args) =>
       client.get(
         `/api/v2/statistics/reports/${requireId(args.report_id, "report_id")}.json`

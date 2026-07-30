@@ -14,7 +14,11 @@ interface RegionItem {
 // /api/v2/regions.json отдаёт всё дерево (~5,5 тыс. записей) одним ответом и
 // не поддерживает ни серверный поиск, ни пагинацию (проверено против живого
 // API). Кэшируем дерево в памяти процесса и ищем по подстроке на клиенте.
+// Справочник публичный и одинаков для всех арендаторов, поэтому ключ — только
+// базовый URL; секретов в кэше нет.
 const REGIONS_TTL_MS = 60 * 60 * 1000;
+/** Потолок на число баз API — чтобы кэш не рос от произвольных X-VK-Ads-Base-Url. */
+const REGIONS_MAX_BASES = 8;
 const regionsCache = new Map<string, { fetchedAt: number; items: RegionItem[] }>();
 
 /** Сбрасывает кэш дерева регионов (для тестов). */
@@ -30,6 +34,13 @@ async function loadRegions(client: VKAdsClient): Promise<RegionItem[]> {
   const data = await client.get("/api/v2/regions.json");
   const items: RegionItem[] = Array.isArray(data?.items) ? data.items : [];
   regionsCache.set(key, { fetchedAt: Date.now(), items });
+
+  if (regionsCache.size > REGIONS_MAX_BASES) {
+    const oldest = [...regionsCache.entries()].sort(
+      (a, b) => a[1].fetchedAt - b[1].fetchedAt
+    )[0];
+    if (oldest) regionsCache.delete(oldest[0]);
+  }
   return items;
 }
 
