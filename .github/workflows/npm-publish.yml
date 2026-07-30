@@ -95,9 +95,48 @@ jobs:
           if [ "${DRY_RUN:-}" = "true" ]; then
             echo "Прогон без публикации."
             npm publish --dry-run --access public
+            exit 0
+          fi
+
+          # Версию в npm перезаписать нельзя. Пропускаем публикацию, если она уже
+          # там есть, — иначе повторный запуск падал бы здесь и не доходил до
+          # обновления записи в реестре MCP.
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$PKG_NAME@$PKG_VERSION уже опубликован в npm — шаг пропущен."
           else
             npm publish --provenance --access public
           fi
+
+      # Запись в реестре MCP живёт отдельно от npm: без этого шага реестр
+      # показывает старую версию, даже когда пакет давно обновлён.
+      - name: Публикация записи в реестре MCP
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            echo "Прогон без публикации — запись в реестре MCP не трогаем."
+            exit 0
+          fi
+
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          # Авторизация тем же GitHub OIDC, что и публикация в npm: секреты не нужны,
+          # право на пространство имён io.github.<организация> даёт сам репозиторий.
+          ./mcp-publisher login github-oidc
+
+          # Реестр проверяет, что пакет уже виден в npm; сразу после публикации
+          # он может ещё не разойтись по зеркалам — поэтому несколько попыток.
+          for attempt in 1 2 3; do
+            if ./mcp-publisher publish; then
+              exit 0
+            fi
+            echo "Попытка $attempt не удалась, повтор через 20 с."
+            sleep 20
+          done
+          echo "::error::Не удалось обновить запись в реестре MCP. Пакет в npm при этом опубликован."
+          exit 1
 
       - name: Итог
         if: success()
@@ -110,5 +149,6 @@ jobs:
             echo "### Прогон завершён: $PKG_NAME@$PKG_VERSION не публиковался" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Опубликовано: $PKG_NAME@$PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
-            echo "https://www.npmjs.com/package/$PKG_NAME/v/$PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo "- npm: https://www.npmjs.com/package/$PKG_NAME/v/$PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo "- реестр MCP: запись $(node -p "require('./package.json').mcpName") обновлена" >> "$GITHUB_STEP_SUMMARY"
           fi
