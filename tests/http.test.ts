@@ -8,7 +8,7 @@ import { McpServer } from "../src/server.ts";
 import {
   buildClientFromHeaders,
   checkAuth,
-  extractPathToken,
+  extractPathCredentials,
   runHttp,
 } from "../src/transports/http.ts";
 import { json, mockFetch, setupTestEnv, teardownTestEnv, testStore } from "./helpers.ts";
@@ -253,18 +253,49 @@ test("CORS preflight отвечает 204 с разрешёнными загол
 
 // --- Токен VK Ads в пути URL (для клиентов без поддержки заголовков) ----------
 
-test("extractPathToken разбирает /t/<токен> и остаток пути", () => {
-  expect(extractPathToken("/t/abc123")).toEqual({ token: "abc123", rest: "/" });
-  expect(extractPathToken("/t/abc123/")).toEqual({ token: "abc123", rest: "/" });
-  expect(extractPathToken("/t/abc123/mcp/tools")).toEqual({
-    token: "abc123",
+test("extractPathCredentials разбирает все три формы и остаток пути", () => {
+  expect(extractPathCredentials("/t/abc123")).toEqual({
+    kind: "token",
+    values: ["abc123"],
+    rest: "/",
+  });
+  expect(extractPathCredentials("/t/abc123/")).toEqual({
+    kind: "token",
+    values: ["abc123"],
+    rest: "/",
+  });
+  expect(extractPathCredentials("/t/abc123/mcp/tools")).toEqual({
+    kind: "token",
+    values: ["abc123"],
     rest: "/mcp/tools",
   });
-  expect(extractPathToken("/t/a%2Bb%3Dc")).toEqual({ token: "a+b=c", rest: "/" });
+  expect(extractPathCredentials("/o/cid/sec")).toEqual({
+    kind: "oauth",
+    values: ["cid", "sec"],
+    rest: "/",
+  });
+  expect(extractPathCredentials("/o/cid/sec/mcp")).toEqual({
+    kind: "oauth",
+    values: ["cid", "sec"],
+    rest: "/mcp",
+  });
+  expect(extractPathCredentials("/c/cr-token/652819")).toEqual({
+    kind: "clickru",
+    values: ["cr-token", "652819"],
+    rest: "/",
+  });
+  expect(extractPathCredentials("/t/a%2Bb%3Dc")).toEqual({
+    kind: "token",
+    values: ["a+b=c"],
+    rest: "/",
+  });
 
-  expect(extractPathToken("/mcp")).toBeNull();
-  expect(extractPathToken("/t/")).toBeNull();
-  expect(extractPathToken("/healthz")).toBeNull();
+  // Недостаточно сегментов или неизвестная форма
+  expect(extractPathCredentials("/mcp")).toBeNull();
+  expect(extractPathCredentials("/t/")).toBeNull();
+  expect(extractPathCredentials("/o/only-id")).toBeNull();
+  expect(extractPathCredentials("/c/only-token")).toBeNull();
+  expect(extractPathCredentials("/healthz")).toBeNull();
 });
 
 test("выключенный по умолчанию /t/<токен> отвечает 404", async () => {
@@ -346,4 +377,94 @@ test("обычный /mcp продолжает требовать токен ш�
     const r = await rpc(base, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(r.status).toBe(401);
   });
+});
+
+test("/o/<client_id>/<client_secret>: сервер сам выпускает токен VK", async () => {
+  let issued = 0;
+  mockFetch((url) => {
+    if (url.includes("oauth2/token.json")) {
+      issued++;
+      return json({ access_token: "vypushchennyi", expires_in: 3600 });
+    }
+    return json({ id: 42 });
+  });
+
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    const r = await rpc(`${base}/o/moi-client-id/moi-secret`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "vk_ads_auth_check", arguments: {} },
+    });
+    const body: any = await r.json();
+    expect(JSON.parse(body.result.content[0].text).user).toEqual({ id: 42 });
+  });
+
+  const { calls } = await import("./helpers.ts");
+  expect(issued).toBe(1);
+  const tokenCall = calls.find((c) => c.url.includes("oauth2/token.json"))!;
+  const form = new URLSearchParams(String(tokenCall.init.body));
+  expect(form.get("grant_type")).toBe("client_credentials");
+  expect(form.get("client_id")).toBe("moi-client-id");
+  expect(form.get("client_secret")).toBe("moi-secret");
+  expect(calls.at(-1)!.init.headers!["Authorization"]).toBe("Bearer vypushchennyi");
+});
+
+test("/c/<токен>/<аккаунт>: токен VK берётся у click.ru", async () => {
+  mockFetch((url) =>
+    url.includes("api.click.ru")
+      ? json({ response: { access_token: "vk-cherez-clickru" } })
+      : json({ id: 7 })
+  );
+
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    const r = await rpc(`${base}/c/cr-token/652819`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "vk_ads_auth_check", arguments: {} },
+    });
+    const body: any = await r.json();
+    expect(JSON.parse(body.result.content[0].text).user).toEqual({ id: 7 });
+  });
+
+  const { calls } = await import("./helpers.ts");
+  const crCall = calls.find((c) => c.url.includes("api.click.ru"))!;
+  expect(crCall.url).toContain("/accounts/652819/access_token/vk_ads/");
+  expect(crCall.init.headers!["X-Auth-Token"]).toBe("cr-token");
+  expect(calls.at(-1)!.init.headers!["Authorization"]).toBe("Bearer vk-cherez-clickru");
+});
+
+test("неполные данные доступа в URL не считаются формой → 404", async () => {
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    // Обращаемся напрямую, без добавления /mcp: иначе недостающий сегмент
+    // занял бы его место и путь стал бы валидной формой.
+    for (const path of ["/o/tolko-id", "/c/tolko-token", "/t/"]) {
+      const r = await realFetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+      });
+      expect(r.status).toBe(404);
+    }
+  });
+});
+
+test("все формы в URL ограничены как размещённый режим", async () => {
+  for (const path of ["/t/tok", "/o/cid/sec", "/c/cr/1"]) {
+    await withServer({ allowUrlCredentials: true }, async (base) => {
+      const r = await rpc(`${base}${path}`, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "vk_ads_content_upload_image",
+          arguments: { source_path_or_url: "/app/.env" },
+        },
+      });
+      const body: any = await r.json();
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toContain("Чтение локальных файлов отключено");
+    });
+  }
 });
