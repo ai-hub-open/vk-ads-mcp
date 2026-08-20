@@ -131,3 +131,26 @@ test("deepNormalize парсит вложенные JSON-строки", () => {
   });
   expect(deepNormalize("42")).toBe("42"); // скаляры-строки не трогаем
 });
+
+test("согласование версии протокола: поддерживаемую отдаём как есть", async () => {
+  for (const requested of ["2025-06-18", "2025-03-26", "2024-11-05"]) {
+    const resp: any = await makeServer().handle({
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: requested },
+    });
+    expect(resp.result.protocolVersion).toBe(requested);
+  }
+});
+
+test("неизвестная или отсутствующая версия → своя по умолчанию", async () => {
+  const unknown: any = await makeServer().handle({
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "1999-01-01" },
+  });
+  expect(unknown.result.protocolVersion).toBe(PROTOCOL_VERSION);
+
+  const absent: any = await makeServer().handle({ id: 1, method: "initialize" });
+  expect(absent.result.protocolVersion).toBe(PROTOCOL_VERSION);
+});

@@ -62,7 +62,8 @@ if (hosted) {
   const host = process.env.MCP_HOST ?? "0.0.0.0";
   const authToken = process.env.MCP_AUTH_TOKEN || undefined;
   const allowedOrigin = process.env.MCP_ALLOWED_ORIGIN || undefined;
-  runHttp(server, { port, host, authToken, allowedOrigin });
+  const allowUrlCredentials = process.env.MCP_ALLOW_URL_TOKEN === "true";
+  runHttp(server, { port, host, authToken, allowedOrigin, allowUrlCredentials });
 } else {
   await runStdio(server);
 }
