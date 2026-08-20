@@ -30,13 +30,38 @@ export interface HttpOptions {
   allowUrlCredentials?: boolean;
 }
 
-/** Разбирает `/t/<токен>[/остаток]`. */
-export function extractPathToken(
-  pathname: string
-): { token: string; rest: string } | null {
-  const m = pathname.match(/^\/t\/([^/]+)(\/.*)?$/);
-  if (!m?.[1]) return null;
-  return { token: decodeURIComponent(m[1]), rest: m[2] || "/" };
+/** Данные доступа, извлечённые из пути URL. */
+export interface UrlCredentials {
+  kind: "token" | "oauth" | "clickru";
+  values: string[];
+  /** Остаток пути после сегментов с данными доступа. */
+  rest: string;
+}
+
+/** Сколько сегментов пути занимает каждая форма. */
+const URL_CREDENTIAL_FORMS = {
+  t: { kind: "token", segments: 1 }, // /t/<access_token>
+  o: { kind: "oauth", segments: 2 }, // /o/<client_id>/<client_secret>
+  c: { kind: "clickru", segments: 2 }, // /c/<токен click.ru>/<id аккаунта>
+} as const;
+
+/**
+ * Разбирает путь вида `/t/<токен>[/остаток]`, `/o/<id>/<секрет>[/остаток]`
+ * или `/c/<токен>/<аккаунт>[/остаток]`.
+ */
+export function extractPathCredentials(pathname: string): UrlCredentials | null {
+  const segments = pathname.split("/").filter((s) => s.length > 0);
+  const head = segments[0];
+  if (!head) return null;
+
+  const form = URL_CREDENTIAL_FORMS[head as keyof typeof URL_CREDENTIAL_FORMS];
+  if (!form || segments.length < 1 + form.segments) return null;
+
+  return {
+    kind: form.kind,
+    values: segments.slice(1, 1 + form.segments).map(decodeURIComponent),
+    rest: "/" + segments.slice(1 + form.segments).join("/"),
+  };
 }
 
 export function runHttp(server: McpServer, opts: HttpOptions) {
@@ -75,22 +100,22 @@ export function runHttp(server: McpServer, opts: HttpOptions) {
         return new Response("OK", { status: 200, headers: baseHeaders });
       }
 
-      // Токен VK Ads прямо в пути: /t/<токен> — эндпоинт MCP для клиентов,
-      // которые не умеют слать заголовки. Сам токен и есть аутентификация,
-      // поэтому токен шлюза для таких запросов не требуется.
+      // Данные доступа прямо в пути — эндпоинт MCP для клиентов, которые не
+      // умеют слать заголовки. Они сами по себе и есть аутентификация, поэтому
+      // токен шлюза для таких запросов не требуется.
       let pathname = url.pathname;
-      let urlToken: string | undefined;
+      let urlCreds: UrlCredentials | undefined;
       if (allowUrlCredentials) {
-        const parsed = extractPathToken(pathname);
+        const parsed = extractPathCredentials(pathname);
         if (parsed) {
-          urlToken = parsed.token;
+          urlCreds = parsed;
           pathname = parsed.rest === "/" ? "/mcp" : parsed.rest;
         }
       }
 
       // Human-friendly список инструментов (без MCP, для отладки)
       if (req.method === "GET" && pathname === "/mcp/tools") {
-        if (!urlToken && !checkAuth(req, authToken)) return unauthorized(baseHeaders);
+        if (!urlCreds && !checkAuth(req, authToken)) return unauthorized(baseHeaders);
         const resp = await server.handle({
           jsonrpc: "2.0",
           id: 1,
@@ -101,7 +126,7 @@ export function runHttp(server: McpServer, opts: HttpOptions) {
 
       // Основной MCP endpoint
       if (pathname === "/mcp") {
-        if (!urlToken && !checkAuth(req, authToken)) return unauthorized(baseHeaders);
+        if (!urlCreds && !checkAuth(req, authToken)) return unauthorized(baseHeaders);
 
         if (req.method === "GET") {
           // Server-initiated SSE стрим не реализован (notifications/listChanged = false).
@@ -126,7 +151,8 @@ export function runHttp(server: McpServer, opts: HttpOptions) {
         // из пути. Если нет ни того ни другого — сервер возьмёт default из .env.
         let clientOverride: VKAdsClient | undefined;
         try {
-          clientOverride = buildClientFromHeaders(req) ?? buildClientFromUrlToken(urlToken);
+          clientOverride =
+            buildClientFromHeaders(req) ?? buildClientFromUrlCredentials(urlCreds);
         } catch (e) {
           return jsonResponse(
             errorResponse(null, -32602, `Invalid credentials headers: ${(e as Error).message}`),
@@ -163,8 +189,10 @@ export function runHttp(server: McpServer, opts: HttpOptions) {
   );
   if (allowUrlCredentials) {
     process.stderr.write(
-      `Токен в URL включён: http://${host}:${httpServer.port}/t/<токен VK Ads> ` +
-        "(токен шлюза для таких запросов не требуется)\n"
+      "Данные доступа в URL включены (токен шлюза для них не требуется):\n" +
+        `  http://${host}:${httpServer.port}/t/<токен VK Ads>\n` +
+        `  http://${host}:${httpServer.port}/o/<client_id>/<client_secret>\n` +
+        `  http://${host}:${httpServer.port}/c/<токен click.ru>/<id аккаунта>\n`
     );
   }
   return httpServer;
@@ -230,16 +258,28 @@ function unauthorized(headers: Record<string, string>): Response {
  *     X-VK-Ads-Base-Url: https://ads.vk.com
  */
 /**
- * Клиент по токену VK Ads из пути URL. Ограничения размещённого режима те же,
+ * Клиент по данным доступа из пути URL. Ограничения размещённого режима те же,
  * что и для кред из заголовков: ни файлов сервера, ни внутренней сети.
+ *
+ * Формы `oauth` и `clickru` несут долгоживущие данные доступа, поэтому сервер
+ * сам выпускает и обновляет короткоживущий токен VK Ads — пользователю не нужно
+ * возвращаться к настройкам каждые сутки.
  */
-export function buildClientFromUrlToken(token?: string): VKAdsClient | undefined {
-  if (!token) return undefined;
-  return new VKAdsClient({
-    accessToken: token,
-    allowLocalFiles: false,
-    allowPrivateNetwork: false,
-  });
+export function buildClientFromUrlCredentials(
+  creds?: UrlCredentials
+): VKAdsClient | undefined {
+  if (!creds) return undefined;
+  const hosted = { allowLocalFiles: false, allowPrivateNetwork: false };
+  const [first, second] = creds.values;
+
+  switch (creds.kind) {
+    case "token":
+      return new VKAdsClient({ ...hosted, accessToken: first });
+    case "oauth":
+      return new VKAdsClient({ ...hosted, clientId: first, clientSecret: second });
+    case "clickru":
+      return new VKAdsClient({ ...hosted, clickRuToken: first, clickRuAccountId: second });
+  }
 }
 
 export function buildClientFromHeaders(req: Request): VKAdsClient | undefined {
