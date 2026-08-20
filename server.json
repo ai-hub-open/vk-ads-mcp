@@ -7,13 +7,13 @@
     "url": "https://github.com/ai-hub-open/vk-ads-mcp",
     "source": "github"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@ai-hub-open/vk-ads-mcp",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "runtimeHint": "bunx",
       "transport": {
         "type": "stdio"

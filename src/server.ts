@@ -16,6 +16,25 @@ import { SERVER_NAME, VERSION } from "./version.ts";
 
 export const PROTOCOL_VERSION = "2024-11-05";
 
+/**
+ * Версии протокола, с которыми сервер совместим. Спецификация требует ответить
+ * той же версией, что запросил клиент, если она поддерживается; иначе — своей.
+ * Сервер отдаёт только инструменты, поэтому различия между этими ревизиями
+ * его поверхности не касаются.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = [
+  "2025-06-18",
+  "2025-03-26",
+  "2024-11-05",
+] as const;
+
+function negotiateProtocolVersion(requested: unknown): string {
+  return typeof requested === "string" &&
+    (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+    ? requested
+    : PROTOCOL_VERSION;
+}
+
 export interface JsonRpcRequest {
   jsonrpc?: string;
   id?: number | string | null;
@@ -67,7 +86,7 @@ export class McpServer {
       switch (method) {
         case "initialize":
           return jsonrpcResponse(id, {
-            protocolVersion: PROTOCOL_VERSION,
+            protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, version: VERSION },
           });

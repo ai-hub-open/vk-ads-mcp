@@ -5,7 +5,12 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { VKAdsClient } from "../src/client.ts";
 import { McpServer } from "../src/server.ts";
-import { buildClientFromHeaders, checkAuth, runHttp } from "../src/transports/http.ts";
+import {
+  buildClientFromHeaders,
+  checkAuth,
+  extractPathToken,
+  runHttp,
+} from "../src/transports/http.ts";
 import { json, mockFetch, setupTestEnv, teardownTestEnv, testStore } from "./helpers.ts";
 
 beforeEach(setupTestEnv);
@@ -93,13 +98,14 @@ test("X-VK-Ads-Base-Url переопределяет базу API", () => {
 // --- Сквозные проверки через реальный сервер ----------------------------------
 
 async function withServer(
-  opts: { authToken?: string; defaultClient?: VKAdsClient },
+  opts: { authToken?: string; defaultClient?: VKAdsClient; allowUrlCredentials?: boolean },
   fn: (base: string) => Promise<void>
 ): Promise<void> {
   const server = runHttp(new McpServer(opts.defaultClient), {
     port: 0,
     host: "127.0.0.1",
     authToken: opts.authToken,
+    allowUrlCredentials: opts.allowUrlCredentials,
   });
   try {
     await fn(`http://127.0.0.1:${server.port}`);
@@ -242,5 +248,102 @@ test("CORS preflight отвечает 204 с разрешёнными загол
     const allowed = r.headers.get("Access-Control-Allow-Headers") ?? "";
     expect(allowed).toContain("X-VK-Ads-Token");
     expect(allowed).toContain("X-Click-Ru-Account-Id");
+  });
+});
+
+// --- Токен VK Ads в пути URL (для клиентов без поддержки заголовков) ----------
+
+test("extractPathToken разбирает /t/<токен> и остаток пути", () => {
+  expect(extractPathToken("/t/abc123")).toEqual({ token: "abc123", rest: "/" });
+  expect(extractPathToken("/t/abc123/")).toEqual({ token: "abc123", rest: "/" });
+  expect(extractPathToken("/t/abc123/mcp/tools")).toEqual({
+    token: "abc123",
+    rest: "/mcp/tools",
+  });
+  expect(extractPathToken("/t/a%2Bb%3Dc")).toEqual({ token: "a+b=c", rest: "/" });
+
+  expect(extractPathToken("/mcp")).toBeNull();
+  expect(extractPathToken("/t/")).toBeNull();
+  expect(extractPathToken("/healthz")).toBeNull();
+});
+
+test("выключенный по умолчанию /t/<токен> отвечает 404", async () => {
+  await withServer({}, async (base) => {
+    const r = await rpc(`${base}/t/some-token`, { jsonrpc: "2.0", id: 1, method: "ping" });
+    expect(r.status).toBe(404);
+  });
+});
+
+test("включённый /t/<токен> работает как MCP-эндпоинт без токена шлюза", async () => {
+  await withServer({ allowUrlCredentials: true, authToken: "gateway-secret" }, async (base) => {
+    const r = await rpc(`${base}/t/vk-token-123`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    const body: any = await r.json();
+    expect(body.result.tools.length).toBeGreaterThan(40);
+  });
+});
+
+test("токен из пути уходит в VK Ads как Bearer", async () => {
+  mockFetch(() => json({ id: 555 }));
+
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    const r = await rpc(`${base}/t/token-iz-puti`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "vk_ads_auth_check", arguments: {} },
+    });
+    const body: any = await r.json();
+    expect(JSON.parse(body.result.content[0].text).user).toEqual({ id: 555 });
+  });
+
+  const { calls } = await import("./helpers.ts");
+  expect(calls.at(-1)!.init.headers!["Authorization"]).toBe("Bearer token-iz-puti");
+});
+
+test("клиент из пути не читает файлы и не ходит во внутреннюю сеть", async () => {
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    const r = await rpc(`${base}/t/vk-token`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "vk_ads_content_upload_image",
+        arguments: { source_path_or_url: "/app/.env" },
+      },
+    });
+    const body: any = await r.json();
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toContain("Чтение локальных файлов отключено");
+  });
+});
+
+test("заголовки имеют приоритет над токеном из пути", async () => {
+  mockFetch(() => json({ id: 1 }));
+
+  await withServer({ allowUrlCredentials: true }, async (base) => {
+    await rpc(
+      `${base}/t/token-iz-puti`,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "vk_ads_auth_check", arguments: {} },
+      },
+      { "X-VK-Ads-Token": "token-iz-zagolovka" }
+    );
+  });
+
+  const { calls } = await import("./helpers.ts");
+  expect(calls.at(-1)!.init.headers!["Authorization"]).toBe("Bearer token-iz-zagolovka");
+});
+
+test("обычный /mcp продолжает требовать токен шлюза", async () => {
+  await withServer({ allowUrlCredentials: true, authToken: "gateway-secret" }, async (base) => {
+    const r = await rpc(base, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(r.status).toBe(401);
   });
 });
