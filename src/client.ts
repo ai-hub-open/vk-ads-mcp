@@ -185,6 +185,21 @@ export class VKAdsClient {
         this.token = cached;
         return cached;
       }
+
+      // Токен просрочен, но есть чем продлить. Продление ЗАМЕНЯЕТ токен, а
+      // выпуск нового занял бы ещё один слот из пяти, отведённых VK на
+      // приложение и пользователя, — поэтому сначала пробуем продлить.
+      const refreshToken = this.store.getEntry(key)?.refresh_token;
+      if (refreshToken && this.hasClientCredentials) {
+        try {
+          return await this.fetchOAuthToken(refreshToken);
+        } catch (e) {
+          process.stderr.write(
+            `Warning: не удалось продлить токен, выпускаем новый: ${(e as Error).message}\n`
+          );
+          this.store.delete(key);
+        }
+      }
     }
 
     if (this.hasClientCredentials) return this.fetchOAuthToken();
@@ -198,35 +213,61 @@ export class VKAdsClient {
     );
   }
 
-  /** Сбрасывает текущий токен и его кэш. */
+  /**
+   * Сбрасывает текущий access_token. refresh_token сохраняется: 401 означает,
+   * что подписка протухла, но продлить её мы ещё можем — а выпуск нового
+   * токена занял бы лишний слот из квоты VK.
+   */
   invalidateToken(): void {
+    this.token = undefined;
+    const key = this.cacheKey();
+    if (key) this.store.expireAccess(key);
+  }
+
+  /** Полностью забывает данные доступа, включая refresh_token. */
+  forgetToken(): void {
     this.token = undefined;
     const key = this.cacheKey();
     if (key) this.store.delete(key);
   }
 
-  private async fetchOAuthToken(): Promise<string> {
+  /**
+   * Выпускает токен по client credentials либо продлевает существующий, если
+   * передан `refreshToken`. Продление предпочтительнее: оно заменяет токен, а
+   * не добавляет новый к квоте в 5 активных токенов.
+   */
+  private async fetchOAuthToken(refreshToken?: string): Promise<string> {
     const path = "/api/v2/oauth2/token.json";
     const form = new URLSearchParams({
-      grant_type: this.agencyClientName ? "agency_client_credentials" : "client_credentials",
       client_id: this.clientId!,
       client_secret: this.clientSecret!,
+      grant_type: refreshToken
+        ? "refresh_token"
+        : this.agencyClientName
+          ? "agency_client_credentials"
+          : "client_credentials",
     });
-    if (this.agencyClientName) form.set("agency_client_name", this.agencyClientName);
+    if (refreshToken) form.set("refresh_token", refreshToken);
+    else if (this.agencyClientName) form.set("agency_client_name", this.agencyClientName);
 
     const r = await this.fetchWithTimeout(this.baseUrl + path, {
       method: "POST",
       body: form,
     });
     const payload = await parseBody(r);
-    if (r.status >= 400) throw new VKAdsError(r.status, payload, path);
+    if (r.status >= 400) throw new VKAdsError(r.status, withTokenLimitHint(payload), path);
 
     const token = (payload as any)?.access_token;
     if (!token) throw new VKAdsError(500, payload, path);
 
     const expiresIn = Number((payload as any)?.expires_in ?? 86400);
     this.token = token;
-    this.store.set(this.cacheKey()!, token, expiresIn);
+    this.store.set(
+      this.cacheKey()!,
+      token,
+      expiresIn,
+      (payload as any)?.refresh_token ?? refreshToken
+    );
     return token;
   }
 
@@ -313,7 +354,8 @@ export class VKAdsClient {
       });
       return { ok: r.status === 200 || r.status === 204, status: r.status };
     } finally {
-      this.invalidateToken();
+      // Отзыв убивает и refresh_token — забываем запись целиком.
+      this.forgetToken();
     }
   }
 
@@ -348,6 +390,23 @@ export class VKAdsClient {
   private fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
     return fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
   }
+}
+
+/**
+ * Дополняет ответ VK подсказкой, если упёрлись в лимит активных токенов:
+ * штатный текст VK предлагает написать письмо, а на деле обычно достаточно
+ * отозвать лишние токены.
+ */
+function withTokenLimitHint(payload: any): any {
+  if (payload?.error !== "token_limit_exceeded") return payload;
+  return {
+    ...payload,
+    hint:
+      "Достигнут лимит активных токенов VK (5 на приложение и пользователя). " +
+      "Отзовите лишние инструментом vk_ads_token_revoke и повторите запрос. " +
+      "Сервер продлевает токен через refresh_token и в норме занимает один слот; " +
+      "лимит обычно означает, что токены выпускались в обход него.",
+  };
 }
 
 /** Тело ответа: JSON, {raw: text} для не-JSON, {} для пустого. */

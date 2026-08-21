@@ -4,6 +4,11 @@
 // отпечаток секрета — иначе в multi-tenant режиме клиент, знающий только
 // публичный идентификатор (client_id, Click.ru accountId), получил бы чужой
 // токен. Хранилище само по себе ключи не проверяет.
+//
+// Вместе с access_token хранится refresh_token: у VK лимит в 5 активных
+// токенов на приложение и пользователя, поэтому просроченный токен нужно
+// ПРОДЛЕВАТЬ, а не выпускать новый. Из-за этого запись с refresh_token
+// переживает истечение срока и не удаляется.
 
 import { createHash } from "node:crypto";
 import {
@@ -23,9 +28,11 @@ const EXPIRY_MARGIN_SEC = 60;
 /** Потолок записей в памяти — чтобы поток арендаторов не выедал память. */
 const DEFAULT_MAX_ENTRIES = 500;
 
-interface CachedToken {
+export interface StoredToken {
   access_token: string;
   expires_at: number; // unix-секунды
+  /** Для продления без выпуска нового токена (grant_type=refresh_token). */
+  refresh_token?: string;
 }
 
 export interface TokenStoreOptions {
@@ -38,8 +45,13 @@ function nowSec(): number {
   return Date.now() / 1000;
 }
 
-function isFresh(t: CachedToken): boolean {
+function isFresh(t: StoredToken): boolean {
   return t.expires_at - EXPIRY_MARGIN_SEC > nowSec();
+}
+
+/** Запись бесполезна: и access протух, и продлить нечем. */
+function isDead(t: StoredToken): boolean {
+  return !isFresh(t) && !t.refresh_token;
 }
 
 /** Каталог кэша по умолчанию: $XDG_CACHE_HOME/vk-ads-mcp или ~/.cache/vk-ads-mcp. */
@@ -49,7 +61,7 @@ export function defaultCacheDir(): string {
 }
 
 export class TokenStore {
-  private readonly memory = new Map<string, CachedToken>();
+  private readonly memory = new Map<string, StoredToken>();
   private readonly maxEntries: number;
   /** `undefined` — каталог берётся из окружения при каждом обращении. */
   private readonly dirOverride: string | null | undefined;
@@ -72,23 +84,23 @@ export class TokenStore {
     return join(dir, `token-${hash}.json`);
   }
 
-  /** Живой токен для ключа или null. */
-  get(key: string): string | null {
+  /** Запись целиком — даже если access_token уже просрочен (нужен refresh_token). */
+  getEntry(key: string): StoredToken | null {
     const mem = this.memory.get(key);
     if (mem) {
-      if (isFresh(mem)) return mem.access_token;
+      if (!isDead(mem)) return mem;
       this.memory.delete(key);
     }
 
     const path = this.filePath(key);
     if (!path || !existsSync(path)) return null;
     try {
-      const data = JSON.parse(readFileSync(path, "utf8")) as CachedToken;
-      if (data?.access_token && isFresh(data)) {
+      const data = JSON.parse(readFileSync(path, "utf8")) as StoredToken;
+      if (data?.access_token && !isDead(data)) {
         this.memory.set(key, data);
-        return data.access_token;
+        return data;
       }
-      // Протухшую запись сразу убираем с диска, чтобы каталог не рос.
+      // Ни живого токена, ни возможности продлить — файл только занимает место.
       this.removeFile(path);
     } catch {
       // Повреждённый файл кэша — не мешает работе, просто удаляем.
@@ -97,11 +109,27 @@ export class TokenStore {
     return null;
   }
 
-  set(key: string, token: string, expiresInSec: number): void {
-    const entry: CachedToken = {
+  /** Живой access_token для ключа или null. */
+  get(key: string): string | null {
+    const entry = this.getEntry(key);
+    return entry && isFresh(entry) ? entry.access_token : null;
+  }
+
+  set(
+    key: string,
+    token: string,
+    expiresInSec: number,
+    refreshToken?: string
+  ): void {
+    const entry: StoredToken = {
       access_token: token,
       expires_at: nowSec() + expiresInSec,
     };
+    // Ротация: VK может вернуть новый refresh_token, но если не вернул —
+    // сохраняем прежний, иначе потеряем возможность продлевать.
+    const previous = refreshToken ?? this.memory.get(key)?.refresh_token;
+    if (previous) entry.refresh_token = previous;
+
     this.memory.set(key, entry);
     this.evict();
 
@@ -122,6 +150,19 @@ export class TokenStore {
     }
   }
 
+  /**
+   * Помечает access_token недействительным, сохраняя refresh_token: сервер
+   * ответил 401, но продлить подписку мы ещё можем.
+   */
+  expireAccess(key: string): void {
+    const entry = this.getEntry(key);
+    if (!entry?.refresh_token) {
+      this.delete(key);
+      return;
+    }
+    this.set(key, entry.access_token, -1, entry.refresh_token);
+  }
+
   delete(key: string): void {
     this.memory.delete(key);
     const path = this.filePath(key);
@@ -138,10 +179,10 @@ export class TokenStore {
     return this.memory.size;
   }
 
-  /** Убирает протухшее, а при переполнении — записи с ближайшим истечением. */
+  /** Убирает бесполезное, а при переполнении — записи с ближайшим истечением. */
   private evict(): void {
     for (const [k, v] of this.memory) {
-      if (!isFresh(v)) this.memory.delete(k);
+      if (isDead(v)) this.memory.delete(k);
     }
     if (this.memory.size <= this.maxEntries) return;
 
