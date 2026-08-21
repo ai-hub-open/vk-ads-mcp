@@ -55,6 +55,12 @@ export interface ClientOptions {
   clickRuBaseUrl?: string;
   /** Таймаут HTTP-запросов в секундах (по умолчанию 30) */
   timeout?: number;
+  /**
+   * Язык названий в справочниках (заголовок Accept-Language). По умолчанию `ru`:
+   * без него VK отдаёт справочник регионов вперемешку — «Москва» приходит как
+   * `Moscow`, и поиск по русскому названию ничего не находит.
+   */
+  language?: string;
 
   /**
    * Разрешить инструментам читать локальные файлы (загрузка креативов с диска).
@@ -84,11 +90,14 @@ function fingerprint(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
 }
 
+export const DEFAULT_LANGUAGE = "ru";
+
 export class VKAdsClient {
   readonly baseUrl: string;
   readonly timeoutMs: number;
   readonly allowLocalFiles: boolean;
   readonly allowPrivateNetwork: boolean;
+  readonly language: string;
 
   private readonly staticToken?: string;
   private readonly clientId?: string;
@@ -115,6 +124,7 @@ export class VKAdsClient {
     this.clickRuBaseUrl = (opts.clickRuBaseUrl || CLICK_RU_DEFAULT_BASE).replace(/\/+$/, "");
     this.allowLocalFiles = opts.allowLocalFiles ?? true;
     this.allowPrivateNetwork = opts.allowPrivateNetwork ?? true;
+    this.language = opts.language || DEFAULT_LANGUAGE;
     this.store = opts.tokenStore ?? defaultTokenStore;
 
     if ((this.clientId && !this.clientSecret) || (!this.clientId && this.clientSecret)) {
@@ -373,6 +383,7 @@ export class VKAdsClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
       "User-Agent": USER_AGENT,
+      "Accept-Language": this.language,
     };
 
     let body: FormData | string | undefined;
