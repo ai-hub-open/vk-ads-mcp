@@ -13,10 +13,16 @@ services:
     #   — MCP_AUTH_TOKEN                             (защита HTTP эндпоинта)
     env_file:
       - .env
+    # Токены доступа переживают перезапуск и выкладку. Без этого сервер после
+    # каждого передеплоя выпускал бы новый токен и за пять раз упирался бы в
+    # лимит активных токенов VK.
+    volumes:
+      - token-cache:/cache
     environment:
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: 3000
+      XDG_CACHE_HOME: /cache
       # Coolify-магия: автоматически выдаст FQDN на этот порт через Traefik.
       # Если деплоите не в Coolify — переменная игнорируется.
       SERVICE_FQDN_MCP_3000: /
@@ -32,3 +38,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  token-cache:

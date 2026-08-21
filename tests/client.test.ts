@@ -337,3 +337,153 @@ test("хранилище по умолчанию не используется, 
   expect(isolated.size).toBe(1);
   expect(testStore.size).toBe(0);
 });
+
+// --- Продление токена вместо выпуска нового (квота VK — 5 активных) ----------
+
+/** Мок VK: считает выпуски и продления, отдаёт токены с ротацией refresh. */
+function mockOAuth(opts: { refreshFails?: boolean } = {}) {
+  const counts = { issued: 0, refreshed: 0 };
+  mockFetch((url, init) => {
+    if (!url.includes("oauth2/token.json")) return json({ ok: true });
+    const form = new URLSearchParams(String((init as any)?.body));
+    if (form.get("grant_type") === "refresh_token") {
+      counts.refreshed++;
+      if (opts.refreshFails) return json({ error: "invalid_grant" }, 400);
+      return json({
+        access_token: `prodlennyi-${counts.refreshed}`,
+        expires_in: 3600,
+        refresh_token: `refresh-v${counts.refreshed + 1}`,
+      });
+    }
+    counts.issued++;
+    return json({
+      access_token: `vypushchennyi-${counts.issued}`,
+      expires_in: 3600,
+      refresh_token: "refresh-v1",
+    });
+  });
+  return counts;
+}
+
+test("refresh_token сохраняется вместе с access_token", async () => {
+  mockOAuth();
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+  expect(testStore.getEntry(key)?.refresh_token).toBe("refresh-v1");
+});
+
+test("просроченный токен продлевается, а не выпускается заново", async () => {
+  const counts = mockOAuth();
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+  expect(counts.issued).toBe(1);
+
+  // Имитируем сутки спустя: access протух, refresh на месте.
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+  testStore.expireAccess(key);
+
+  const fresh = await client({ clientId: "cid", clientSecret: "sec" }).ensureToken();
+  expect(fresh).toBe("prodlennyi-1");
+  expect(counts.refreshed).toBe(1);
+  expect(counts.issued).toBe(1); // новый слот квоты НЕ занят
+});
+
+test("продление шлёт grant_type=refresh_token с client credentials", async () => {
+  mockOAuth();
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+  testStore.expireAccess(key);
+  await client({ clientId: "cid", clientSecret: "sec" }).ensureToken();
+
+  const last = calls.filter((x) => x.url.includes("token.json")).at(-1)!;
+  const form = new URLSearchParams(String(last.init.body));
+  expect(form.get("grant_type")).toBe("refresh_token");
+  expect(form.get("refresh_token")).toBe("refresh-v1");
+  expect(form.get("client_id")).toBe("cid");
+  expect(form.get("client_secret")).toBe("sec");
+});
+
+test("ротация: новый refresh_token из ответа заменяет прежний", async () => {
+  mockOAuth();
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+
+  testStore.expireAccess(key);
+  await client({ clientId: "cid", clientSecret: "sec" }).ensureToken();
+  expect(testStore.getEntry(key)?.refresh_token).toBe("refresh-v2");
+});
+
+test("401 не выбрасывает refresh_token — следующий запрос продлевает", async () => {
+  const counts = { issued: 0, refreshed: 0 };
+  let apiCalls = 0;
+  mockFetch((url, init) => {
+    if (url.includes("oauth2/token.json")) {
+      const form = new URLSearchParams(String((init as any)?.body));
+      if (form.get("grant_type") === "refresh_token") {
+        counts.refreshed++;
+        return json({ access_token: "posle-401", expires_in: 3600 });
+      }
+      counts.issued++;
+      return json({ access_token: "pervyi", expires_in: 3600, refresh_token: "r1" });
+    }
+    apiCalls++;
+    return apiCalls === 1 ? json({ error: "expired" }, 401) : json({ id: 1 });
+  });
+
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  expect(await c.get("/api/v2/user.json")).toEqual({ id: 1 });
+
+  expect(counts.issued).toBe(1);
+  expect(counts.refreshed).toBe(1); // продлили, а не выпустили второй
+  expect(calls.at(-1)!.init.headers!["Authorization"]).toBe("Bearer posle-401");
+});
+
+test("если продление не удалось — выпускаем новый токен", async () => {
+  const counts = mockOAuth({ refreshFails: true });
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+  testStore.expireAccess(key);
+
+  const token = await client({ clientId: "cid", clientSecret: "sec" }).ensureToken();
+  expect(counts.refreshed).toBe(1);
+  expect(counts.issued).toBe(2);
+  expect(token).toBe("vypushchennyi-2");
+});
+
+test("token_limit_exceeded дополняется подсказкой", async () => {
+  mockFetch(() =>
+    json({ error: "token_limit_exceeded", error_description: "Active access token limit reached." }, 403)
+  );
+
+  try {
+    await client({ clientId: "cid", clientSecret: "sec" }).ensureToken();
+    expect.unreachable("должен был бросить");
+  } catch (e) {
+    const payload = (e as VKAdsError).payload as any;
+    expect(payload.error).toBe("token_limit_exceeded");
+    expect(payload.hint).toContain("vk_ads_token_revoke");
+  }
+});
+
+test("revokeToken забывает и refresh_token", async () => {
+  mockFetch((url) => {
+    if (url.includes("token/delete.json")) return new Response("", { status: 204 });
+    if (url.includes("token.json")) {
+      return json({ access_token: "t", expires_in: 3600, refresh_token: "r1" });
+    }
+    return json({});
+  });
+
+  const c = client({ clientId: "cid", clientSecret: "sec" });
+  await c.ensureToken();
+  const key = [...(testStore as any)["memory"].keys()][0] as string;
+  expect(testStore.getEntry(key)?.refresh_token).toBe("r1");
+
+  await c.revokeToken();
+  expect(testStore.getEntry(key)).toBeNull();
+});
