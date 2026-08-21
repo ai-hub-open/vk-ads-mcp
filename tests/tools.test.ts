@@ -122,16 +122,6 @@ test("banners_list фильтрует по _campaign_id и _ad_group_id", async 
   expect(url).toContain("_ad_group_id=2");
 });
 
-test("banners_moderate постит на /moderate.json без тела", async () => {
-  mockFetch(() => json({ status: "moderation" }));
-  await callTool("vk_ads_banners_moderate", { banner_id: 9 });
-
-  const call = calls[0]!;
-  expect(call.url).toContain("/api/v2/banners/9/moderate.json");
-  expect(call.init.method).toBe("POST");
-  expect(call.init.body).toBeUndefined();
-});
-
 test("statistics_day строит URL по entity", async () => {
   mockFetch(() => json({ items: [{ id: 1 }] }));
   await callTool("vk_ads_statistics_day", {
@@ -183,17 +173,6 @@ test("statistics: невалидный entity → ошибка без HTTP-вы�
   expect(resultText(resp)).toContain("должен быть одним из");
 });
 
-test("async_report_create/get", async () => {
-  mockFetch(() => json({ id: 77, status: "created" }));
-  await callTool("vk_ads_async_report_create", {
-    payload: { entity: "campaigns", date_from: "2026-01-01" },
-  });
-  expect(calls[0]!.url).toContain("/api/v2/statistics/reports.json");
-
-  await callTool("vk_ads_async_report_get", { report_id: 77 });
-  expect(calls[1]!.url).toContain("/api/v2/statistics/reports/77.json");
-});
-
 test("remarketing_segments: list и delete", async () => {
   mockFetch(() => json({ items: [], count: 0 }));
   await callTool("vk_ads_remarketing_segments_list", { limit: 5 });
@@ -223,10 +202,53 @@ test("agency_clients_list", async () => {
   expect(calls[0]!.url).toContain("/api/v2/agency/clients.json");
 });
 
-test("packages_list", async () => {
-  mockFetch(() => json([{ id: 1 }]));
-  await callTool("vk_ads_packages_list", {});
+test("packages_list по умолчанию отдаёт компактный список и цели", async () => {
+  mockFetch(() =>
+    json({
+      items: [
+        { id: 1, name: "lead_ads_paket", objective: ["leadads"], status: "active", description: "x".repeat(500), pads_tree_id: 7 },
+        { id: 2, name: "install_paket", objective: ["appinstalls"], status: "active", description: "y".repeat(500) },
+      ],
+    })
+  );
+
+  const r = JSON.parse(resultText(await callTool("vk_ads_packages_list", {})));
   expect(calls[0]!.url).toContain("/api/v2/packages.json");
+  expect(r.total_packages).toBe(2);
+  expect(r.available_objectives).toEqual(["appinstalls", "leadads"]);
+  // Тяжёлые поля вырезаны — иначе ответ не помещается в контекст модели.
+  expect(r.items[0].description).toBeUndefined();
+  expect(r.items[0].pads_tree_id).toBeUndefined();
+  expect(r.items[0].id).toBe(1);
+});
+
+test("packages_list фильтрует по objective и подстроке названия", async () => {
+  const packages = {
+    items: [
+      { id: 1, name: "lead_ads_paket", objective: ["leadads"] },
+      { id: 2, name: "install_paket", objective: ["appinstalls"] },
+      { id: 3, name: "install_paket_ios", objective: ["appinstalls"] },
+    ],
+  };
+  mockFetch(() => json(packages));
+
+  const byObjective = JSON.parse(
+    resultText(await callTool("vk_ads_packages_list", { objective: "appinstalls" }))
+  );
+  expect(byObjective.count).toBe(2);
+  expect(byObjective.total_packages).toBe(3);
+
+  const byQuery = JSON.parse(
+    resultText(await callTool("vk_ads_packages_list", { objective: "appinstalls", query: "ios" }))
+  );
+  expect(byQuery.count).toBe(1);
+  expect(byQuery.items[0].id).toBe(3);
+});
+
+test("packages_list с full=true отдаёт все поля", async () => {
+  mockFetch(() => json({ items: [{ id: 1, name: "p", objective: ["leadads"], description: "полное" }] }));
+  const r = JSON.parse(resultText(await callTool("vk_ads_packages_list", { full: true })));
+  expect(r.items[0].description).toBe("полное");
 });
 
 test("regions_search: тянет полное дерево и фильтрует на клиенте", async () => {

@@ -62,11 +62,14 @@ export function registerCampaigns(registry: ToolRegistry): void {
     name: "vk_ads_campaigns_create",
     description:
       "Создать campaign (UI «Группа объявлений»). payload по схеме Campaign VK Ads: " +
-      "name, objective, budget_limit, budget_limit_day, package_id, targetings и т.д. " +
+      "обязательны name и package_id; далее objective, budget_limit, budget_limit_day, " +
+      "targetings и т.д. " +
       "⚠ Обязательно указывайте ad_plan_id — campaign без него не будет видна " +
-      "в новом интерфейсе ads.vk.com (сущность-«сирота»).",
+      "в новом интерфейсе ads.vk.com (сущность-«сирота»). " +
+      "⚠ Объявления создаются ТОЛЬКО здесь — вложенным массивом `banners: [...]`: " +
+      "отдельного создания объявления в API нет.",
     inputSchema: payloadSchema(
-      "Объект Campaign по схеме VK Ads (name, ad_plan_id, package_id, targetings…)"
+      "Объект Campaign по схеме VK Ads (name, package_id, ad_plan_id, targetings, banners…)"
     ),
     handler: (client, args) => client.post("/api/v2/campaigns.json", args.payload),
   });

@@ -318,7 +318,7 @@ export class VKAdsClient {
     }
 
     const payload = await parseBody(r);
-    if (r.status >= 400) throw new VKAdsError(r.status, payload, path);
+    if (r.status >= 400) throw new VKAdsError(r.status, withQuotaHint(r.status, payload), path);
     return payload;
   }
 
@@ -417,6 +417,24 @@ function withTokenLimitHint(payload: any): any {
       "Отзовите лишние инструментом vk_ads_token_revoke и повторите запрос. " +
       "Сервер продлевает токен через refresh_token и в норме занимает один слот; " +
       "лимит обычно означает, что токены выпускались в обход него.",
+  };
+}
+
+/**
+ * Отличает нулевую квоту от всплеска запросов: VK отвечает 429 и в случае,
+ * когда у аккаунта просто нет доступа к эндпоинту, — тогда лимит равен нулю
+ * и повторять запрос бессмысленно.
+ */
+function withQuotaHint(status: number, payload: any): any {
+  if (status !== 429 || !payload?.limits) return payload;
+  const limits = Object.values(payload.limits as Record<string, number>);
+  if (limits.length === 0 || limits.some((v) => Number(v) > 0)) return payload;
+  return {
+    ...payload,
+    hint:
+      "Лимит запросов равен нулю — это не временное ограничение, а отсутствие " +
+      "доступа к этому эндпоинту у аккаунта. Повторять запрос бесполезно; " +
+      "нужны соответствующие права в кабинете ВК Рекламы.",
   };
 }
 

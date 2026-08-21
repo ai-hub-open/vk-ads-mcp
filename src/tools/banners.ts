@@ -1,4 +1,10 @@
 // Banners в терминах VK Ads API = «Объявления» в новом UI ads.vk.com.
+//
+// Отдельного создания объявления в API нет: `POST /api/v2/banners.json`
+// отвечает 405 `unsupported_http_method` с `supported_methods: ["GET"]`.
+// Объявления заводятся вложенным массивом `banners` внутри campaign — см.
+// vk_ads_campaigns_create. Маршрута `/banners/{id}/moderate.json` тоже нет
+// (проверено против ads.vk.com: отвечает как несуществующий путь).
 
 import type { ToolRegistry } from "../toolRegistry.ts";
 import {
@@ -8,7 +14,6 @@ import {
   idSchema,
   paginationParams,
   paginationProps,
-  payloadSchema,
   requireId,
 } from "./util.ts";
 
@@ -60,18 +65,6 @@ export function registerBanners(registry: ToolRegistry): void {
   });
 
   registry.register({
-    name: "vk_ads_banners_create",
-    description:
-      "Создать banner (UI «Объявление»). payload должен включать ad_group_id, urls, " +
-      "textblocks и ссылки на контент (например content.image_id из " +
-      "vk_ads_content_upload_image). См. схему Banner VK Ads.",
-    inputSchema: payloadSchema(
-      "Объект Banner по схеме VK Ads (ad_group_id, urls, textblocks, content…)"
-    ),
-    handler: (client, args) => client.post("/api/v2/banners.json", args.payload),
-  });
-
-  registry.register({
     name: "vk_ads_banners_update",
     description:
       "Обновить banner (UI «Объявление»): статус, ссылки, тексты, ссылки на креативы.",
@@ -80,16 +73,6 @@ export function registerBanners(registry: ToolRegistry): void {
       client.post(
         `/api/v2/banners/${requireId(args.banner_id, "banner_id")}.json`,
         args.payload
-      ),
-  });
-
-  registry.register({
-    name: "vk_ads_banners_moderate",
-    description: "Отправить banner (UI «Объявление») на модерацию.",
-    inputSchema: idSchema("banner_id", "ID banner"),
-    handler: (client, args) =>
-      client.post(
-        `/api/v2/banners/${requireId(args.banner_id, "banner_id")}/moderate.json`
       ),
   });
 
