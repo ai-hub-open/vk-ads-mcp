@@ -351,3 +351,44 @@ test("file:// отвергается даже при разрешённой вн
   expect(resp.result.isError).toBe(true);
   expect(resultText(resp)).toContain("Схема file: запрещена");
 });
+
+test("regions_search находит по русскому названию", async () => {
+  mockFetch(() =>
+    json({
+      count: 3,
+      items: [
+        { id: 188, name: "Россия", parent_id: 100001 },
+        { id: 70, name: "Московская область", parent_id: 188 },
+        { id: 5506, name: "Москва", parent_id: 70 },
+      ],
+    })
+  );
+
+  // «моск» — общая подстрока обоих названий: в «московская» после «моск» идёт «о».
+  const resp = await callTool("vk_ads_regions_search", { query: "моск" });
+  const r = JSON.parse(resultText(resp));
+  expect(r.count).toBe(2);
+  expect(r.items.map((x: any) => x.name)).toEqual(["Московская область", "Москва"]);
+  expect(calls[0]!.init.headers!["Accept-Language"]).toBe("ru");
+
+  // Регистр не важен, «Россия» под запрос не подходит.
+  const upper = JSON.parse(resultText(await callTool("vk_ads_regions_search", { query: "МОСКВА" })));
+  expect(upper.items.map((x: any) => x.name)).toEqual(["Москва"]);
+});
+
+test("кэш дерева регионов учитывает язык", async () => {
+  mockFetch((url, init) => {
+    const lang = (init as any)?.headers?.["Accept-Language"];
+    return json({ items: [{ id: 5506, name: lang === "en" ? "Moscow" : "Москва" }] });
+  });
+
+  const ru = JSON.parse(resultText(await callTool("vk_ads_regions_search", { query: "Москва" })));
+  expect(ru.count).toBe(1);
+
+  // Другой язык — отдельная запись кэша, а не переиспользование русской.
+  const en = JSON.parse(
+    resultText(await callTool("vk_ads_regions_search", { query: "Moscow" }, { language: "en" }))
+  );
+  expect(en.count).toBe(1);
+  expect(calls.length).toBe(2);
+});

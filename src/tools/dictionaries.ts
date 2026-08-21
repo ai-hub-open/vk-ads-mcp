@@ -27,7 +27,8 @@ export function clearRegionsCache(): void {
 }
 
 async function loadRegions(client: VKAdsClient): Promise<RegionItem[]> {
-  const key = client.baseUrl;
+  // Язык — часть ключа: названия локализуются, и дерево на разных языках разное.
+  const key = `${client.baseUrl}|${client.language}`;
   const cached = regionsCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < REGIONS_TTL_MS) return cached.items;
 
