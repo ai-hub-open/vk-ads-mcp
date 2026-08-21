@@ -31,14 +31,14 @@ test("serverInfo сообщает версию из package.json, а не зах
   expect(VERSION).toMatch(/^\d+\.\d+\.\d+/);
 });
 
-test("tools/list: 48 инструментов, все с префиксом vk_ads_ и валидными схемами", async () => {
+test("tools/list: 44 инструмента, все с префиксом vk_ads_ и валидными схемами", async () => {
   const resp: any = await makeServer().handle({ id: 1, method: "tools/list" });
   const tools = resp.result.tools;
 
-  expect(tools.length).toBe(48);
+  expect(tools.length).toBe(44);
 
   const names = tools.map((t: any) => t.name);
-  expect(new Set(names).size).toBe(48);
+  expect(new Set(names).size).toBe(44);
 
   for (const t of tools) {
     expect(t.name.startsWith("vk_ads_")).toBe(true);
@@ -153,4 +153,20 @@ test("неизвестная или отсутствующая версия → 
 
   const absent: any = await makeServer().handle({ id: 1, method: "initialize" });
   expect(absent.result.protocolVersion).toBe(PROTOCOL_VERSION);
+});
+
+test("фиктивных инструментов нет: их эндпоинты не существуют в API", async () => {
+  const resp: any = await makeServer().handle({ id: 1, method: "tools/list" });
+  const names = resp.result.tools.map((t: any) => t.name);
+
+  // Проверено против ads.vk.com: POST /banners.json → 405 (только GET),
+  // /banners/{id}/moderate.json и /statistics/reports.json → 404.
+  for (const gone of [
+    "vk_ads_banners_create",
+    "vk_ads_banners_moderate",
+    "vk_ads_async_report_create",
+    "vk_ads_async_report_get",
+  ]) {
+    expect(names).not.toContain(gone);
+  }
 });

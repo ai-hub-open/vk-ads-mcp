@@ -1,6 +1,6 @@
 {
   "name": "@ai-hub-open/vk-ads-mcp",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "MCP server for VK Ads API (ads.vk.com, myTarget v2) — Bun/TypeScript port",
   "license": "Apache-2.0",
   "type": "module",

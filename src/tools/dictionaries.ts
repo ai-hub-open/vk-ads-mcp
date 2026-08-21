@@ -11,6 +11,31 @@ interface RegionItem {
   flags?: string[];
 }
 
+interface PackageItem {
+  id: number;
+  name?: string;
+  objective?: string[];
+  status?: string;
+  price?: string;
+  priced_event_type?: string;
+  banner_format_id?: number;
+  max_banners_in_one_campaign?: number;
+}
+
+/** Пакет без описаний и служебных деревьев — иначе ответ на сотни килобайт. */
+function compactPackage(p: PackageItem): PackageItem {
+  return {
+    id: p.id,
+    name: p.name,
+    objective: p.objective,
+    status: p.status,
+    price: p.price,
+    priced_event_type: p.priced_event_type,
+    banner_format_id: p.banner_format_id,
+    max_banners_in_one_campaign: p.max_banners_in_one_campaign,
+  };
+}
+
 // /api/v2/regions.json отдаёт всё дерево (~5,5 тыс. записей) одним ответом и
 // не поддерживает ни серверный поиск, ни пагинацию (проверено против живого
 // API). Кэшируем дерево в памяти процесса и ищем по подстроке на клиенте.
@@ -49,10 +74,57 @@ export function registerDictionaries(registry: ToolRegistry): void {
   registry.register({
     name: "vk_ads_packages_list",
     description:
-      "Список доступных рекламных пакетов (форматы объявлений / места размещения). " +
-      "package_id нужен при создании campaign.",
-    inputSchema: { type: "object", properties: {} },
-    handler: (client) => client.get("/api/v2/packages.json"),
+      "Список рекламных пакетов (форматы объявлений и места размещения). " +
+      "package_id обязателен при создании campaign. Полный список — около 170 " +
+      "пакетов и сотни килобайт, поэтому по умолчанию возвращаются только " +
+      "ключевые поля; фильтруйте по objective (цели кампании). Доступные " +
+      "значения objective приходят в поле available_objectives.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        objective: {
+          type: "string",
+          description:
+            "Фильтр по цели: appinstalls, site_conversions, leadads, socialengagement и др.",
+        },
+        query: {
+          type: "string",
+          description: "Фильтр по подстроке в названии пакета (опционально)",
+        },
+        full: {
+          type: "boolean",
+          description: "Вернуть все поля пакета — ответ очень большой",
+          default: false,
+        },
+      },
+    },
+    handler: async (client, args) => {
+      const data = await client.get("/api/v2/packages.json");
+      const all: PackageItem[] = Array.isArray(data?.items) ? data.items : [];
+
+      const availableObjectives = [
+        ...new Set(all.flatMap((p) => p.objective ?? [])),
+      ].sort();
+
+      let items = all;
+      if (args.objective) {
+        const want = String(args.objective).toLowerCase();
+        items = items.filter((p) =>
+          (p.objective ?? []).some((o) => String(o).toLowerCase() === want)
+        );
+      }
+      if (args.query) {
+        const q = String(args.query).toLowerCase();
+        items = items.filter((p) => p.name?.toLowerCase().includes(q));
+      }
+
+      return {
+        count: items.length,
+        total_packages: all.length,
+        available_objectives: availableObjectives,
+        items: args.full ? items : items.map(compactPackage),
+      };
+    },
   });
 
   registry.register({
@@ -92,15 +164,17 @@ export function registerDictionaries(registry: ToolRegistry): void {
   registry.register({
     name: "vk_ads_dictionary_get",
     description:
-      "Получить произвольный справочник VK Ads по имени. Примеры: " +
-      "interests → /api/v2/interests.json, browsers → /api/v2/browsers.json, " +
-      "currencies → /api/v2/currencies.json, sectors → /api/v2/sectors.json.",
+      "Получить справочник VK Ads по имени: запрашивает /api/v2/<имя>.json. " +
+      "Проверены и работают: currencies (валюты и минимальные бюджеты), " +
+      "countries (страны), regions (полное дерево регионов — большое, для поиска " +
+      "лучше vk_ads_regions_search). Многие ожидаемые имена в API отсутствуют и " +
+      "отвечают 404 — в частности interests, sectors, browsers, languages, os.",
     inputSchema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Имя справочника (interests, browsers, currencies, sectors…)",
+          description: "Имя справочника: currencies, countries, regions",
         },
         params: {
           type: "object",
