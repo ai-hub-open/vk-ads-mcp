@@ -487,3 +487,12 @@ test("revokeToken забывает и refresh_token", async () => {
   await c.revokeToken();
   expect(testStore.getEntry(key)).toBeNull();
 });
+
+test("Accept-Language: по умолчанию ru, настраивается", async () => {
+  mockFetch(() => json({ items: [] }));
+  await client({ accessToken: "t" }).get("/api/v2/regions.json");
+  expect(calls[0]!.init.headers!["Accept-Language"]).toBe("ru");
+
+  await client({ accessToken: "t", language: "en" }).get("/api/v2/regions.json");
+  expect(calls[1]!.init.headers!["Accept-Language"]).toBe("en");
+});
